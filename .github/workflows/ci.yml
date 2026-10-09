@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the openclaw devDependency version for reproducible runs.
+  OPENCLAW_IMAGE: ghcr.io/openclaw/openclaw:2026.9.9
+
+jobs:
+  test:
+    name: typecheck + vitest (OpenClaw image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull OpenClaw image
+        run: docker pull "$OPENCLAW_IMAGE"
+
+      # Mirrors scripts/test.sh: OpenClaw is never installed on the host. The
+      # container runs as the runner's uid so the bind mount stays writable,
+      # and HOME/npm cache are redirected to /tmp (the image's node user owns
+      # /home/node, which the runner uid cannot write).
+      - name: Run tests inside the OpenClaw image
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e npm_config_cache=/tmp/.npm -e NODE_ENV=development \
+            -v "$PWD":/plugin -w /plugin \
+            --entrypoint sh "$OPENCLAW_IMAGE" -lc '
+              set -e
+              node -v
+              npm install --include=dev --no-audit --no-fund --ignore-scripts \
+                --allow-remote=all --loglevel=error
+              npm run typecheck
+              npm test
+            '
