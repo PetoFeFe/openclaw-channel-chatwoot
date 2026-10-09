@@ -1,0 +1,45 @@
+{
+  "name": "@santzit/openclaw-channel-chatwoot",
+  "version": "0.1.0",
+  "description": "Native OpenClaw channel plugin for Chatwoot (thin adapter; Chatwoot owns conversations, OpenClaw owns agent execution).",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/santzit/openclaw-channel-chatwoot.git"
+  },
+  "files": [
+    "index.ts",
+    "setup-entry.ts",
+    "src",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "setupEntry": "./setup-entry.ts",
+    "channel": {
+      "id": "chatwoot",
+      "label": "Chatwoot",
+      "blurb": "Connect OpenClaw to Chatwoot conversations."
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "id": "chatwoot",
+  "name": "Chatwoot",
+  "description": "Native OpenClaw channel plugin for Chatwoot. Chatwoot stays the source of truth for conversations and human support; OpenClaw handles AI execution.",
+  "version": "0.1.0",
+  "channels": ["chatwoot"],
+  "categories": ["channels"],
+  "channelConfigs": {
+    "chatwoot": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseUrl": {
+            "type": "string",
+            "description": "Chatwoot base URL, e.g. https://app.chatwoot.com"
+          },
+          "accountId": {
+            "type": ["integer", "string"],
+            "description": "Chatwoot account id"
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Chatwoot user API access token (api_access_token)"
+          },
+          "webhookSecret": {
+            "type": "string",
+            "description": "Shared secret used to authenticate inbound webhooks (HMAC-SHA256 of the raw body, hex, in the configured header)"
+          },
+          "webhookHeader": {
+            "type": "string",
+            "default": "x-openclaw-signature",
+            "description": "Header carrying the webhook HMAC signature"
+          },
+          "webhookPath": {
+            "type": "string",
+            "default": "/chatwoot/webhook",
+            "description": "Gateway HTTP path that receives Chatwoot webhooks"
+          },
+          "receptionTeamId": {
+            "type": ["integer", "string"],
+            "description": "Chatwoot team id that human reception is assigned to"
+          },
+          "receptionTeamName": {
+            "type": "string",
+            "description": "Optional human-readable reception team name (diagnostics only)"
+          },
+          "fallbackModels": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Ordered fallback models tried on quota exhaustion or transient model failure"
+          },
+          "handoffNotice": {
+            "type": "string",
+            "description": "Customer-facing notice sent when handing off to reception"
+          },
+          "handoffNoteTemplate": {
+            "type": "string",
+            "description": "Private note added to the conversation on handoff"
+          },
+          "maxRetries": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 3
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "dmSecurity": {
+            "type": "string",
+            "description": "DM policy (e.g. allowlist, open)"
+          }
+        },
+        "required": ["baseUrl", "accountId", "apiToken"]
+      },
+      "uiHints": {
+        "apiToken": { "label": "Chatwoot API token", "sensitive": true },
+        "webhookSecret": { "label": "Webhook secret", "sensitive": true },
+        "baseUrl": { "label": "Chatwoot base URL", "placeholder": "https://app.chatwoot.com" },
+        "accountId": { "label": "Account id" },
+        "receptionTeamId": { "label": "Reception team id" }
+      }
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "stateDir": {
+        "type": "string",
+        "description": "Directory for durable plugin state (processed events, handoff status, pending effects)"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "default": 15000
+      }
+    }
+  }
+}
