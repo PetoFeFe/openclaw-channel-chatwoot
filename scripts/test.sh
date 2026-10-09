@@ -12,7 +12,8 @@ case "$COMMAND" in
     docker compose run --rm --no-deps -w /plugin --entrypoint sh openclaw-gateway -lc '
       set -e
       node -v
-      npm install --no-audit --no-fund --loglevel=error
+      # The image sets NODE_ENV=production; force dev deps in for the suite.
+      NODE_ENV=development npm install --include=dev --no-audit --no-fund --ignore-scripts --allow-remote=all --loglevel=error
       npm run typecheck
       npm test
     '

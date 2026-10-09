@@ -23,6 +23,9 @@ export interface ResolvedChatwootAccount {
 
 type UnknownRecord = Record<string, unknown>;
 
+/** The exact `base` surface `createChatChannelPlugin` accepts. */
+type ChatwootChatBase = Parameters<typeof createChatChannelPlugin<ResolvedChatwootAccount>>[0]["base"];
+
 function channelSection(cfg: OpenClawConfig, accountId?: string | null): UnknownRecord {
   const channels = ((cfg as unknown as { channels?: UnknownRecord }).channels ?? {}) as UnknownRecord;
   const section = (channels["chatwoot"] ?? {}) as UnknownRecord;
@@ -74,19 +77,19 @@ export function bindAccountResolver(
   accountResolver = resolver;
 }
 
-function resolveOutboundAccount(
-  params: { account?: unknown; accountId?: unknown; to?: unknown }
-): ResolvedChatwootAccount | undefined {
-  if (params.account && typeof params.account === "object") {
-    return params.account as ResolvedChatwootAccount;
-  }
-  const accountId = typeof params.accountId === "string" ? params.accountId : undefined;
-  if (accountResolver) return accountResolver(accountId);
-  if (params.to) {
-    const parsed = parseTarget(String(params.to));
-    if (parsed.accountId) return accountResolver ? accountResolver(parsed.accountId) : undefined;
-  }
+function resolveOutboundAccount(params: {
+  cfg?: OpenClawConfig;
+  accountId?: string | null;
+  to?: string;
+}): ResolvedChatwootAccount | undefined {
+  if (params.cfg) return resolveAccount(params.cfg, params.accountId ?? undefined);
+  const targetAccountId = params.to ? parseTarget(params.to).accountId : undefined;
+  if (accountResolver) return accountResolver(params.accountId ?? targetAccountId);
   return undefined;
+}
+
+function messageIdOrEmpty(messageId: number | string | null | undefined): string {
+  return messageId === undefined || messageId === null ? "" : String(messageId);
 }
 
 export const chatwootPlugin = createChatChannelPlugin<ResolvedChatwootAccount>({
@@ -118,48 +121,49 @@ export const chatwootPlugin = createChatChannelPlugin<ResolvedChatwootAccount>({
           }
         }) as OpenClawConfig
     }
-  }),
+    // The base helper returns `config?` while the chat plugin base requires it;
+    // the object literal above is validated against the helper's option type.
+  }) as unknown as ChatwootChatBase,
 
   security: {
     dm: {
       channelKey: "chatwoot",
-      resolvePolicy: (account) => account.config.dmSecurity,
+      resolvePolicy: (account) => account.config.dmSecurity ?? "open",
       resolveAllowFrom: (account) => account.config.allowFrom ?? [],
-      defaultPolicy: "allowlist"
+      defaultPolicy: "open"
     }
   },
 
   threading: { topLevelReplyToMode: "reply" },
 
   outbound: {
+    base: { deliveryMode: "direct" },
     attachedResults: {
       channel: "chatwoot",
-      sendText: async (params) => {
-        // `params.to` is the resolved conversation target; when the account is
-        // not resolvable from the target we fall back to the bound resolver.
-        const target = String(params.to ?? "");
-        const parsed = parseTarget(target);
-        const account = resolveOutboundAccount(params);
+      sendText: async (ctx) => {
+        // `ctx.to` is the resolved conversation target; the account comes from
+        // the config carried in the delivery context (or the bound resolver).
+        const parsed = parseTarget(ctx.to);
+        const account = resolveOutboundAccount(ctx);
         if (!account) throw new Error("chatwoot: outbound requires a resolved account");
         const result = await account.client.sendMessage({
           conversationId: parsed.conversationId,
-          content: params.text
+          content: ctx.text
         });
-        return { messageId: result.messageId };
-      }
-    },
-    base: {
-      sendMedia: async (params) => {
-        const account = resolveOutboundAccount(params);
+        return { messageId: messageIdOrEmpty(result.messageId) };
+      },
+      sendMedia: async (ctx) => {
+        const parsed = parseTarget(ctx.to);
+        const account = resolveOutboundAccount(ctx);
         if (!account) throw new Error("chatwoot: outbound requires a resolved account");
-        const parsed = parseTarget(String(params.to ?? ""));
-        // Chatwoot public API supports attachments via multipart; for now we send
-        // a text notice referencing the media path and leave upload wiring to the
-        // operator-configured Chatwoot inbox.
-        await account.client.sendMessage({
+        // Chatwoot's public API accepts attachments via multipart upload. Until
+        // that adapter is wired we forward the caption/URL as text so nothing is
+        // silently dropped.
+        const result = await account.client.sendMessage({
           conversationId: parsed.conversationId,
-          content: params.text ?? params.filePath ?? ""
+          content: ctx.text || ctx.mediaUrl || ""
         });
+        return { messageId: messageIdOrEmpty(result.messageId) };
       }
     }
   }

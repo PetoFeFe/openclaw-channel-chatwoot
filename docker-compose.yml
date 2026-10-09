@@ -9,7 +9,8 @@ services:
     container_name: openclaw-channel-chatwoot
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-change-me-in-env}
       OPENCLAW_CHATWOOT_STATE_DIR: /home/node/.openclaw/plugin-state/chatwoot
@@ -18,13 +19,17 @@ services:
     volumes:
       # Persistent OpenClaw state (config, credentials, sessions, plugin state).
       - openclaw-state:/home/node/.openclaw
-      # This plugin, mounted read-only for the Gateway.
-      - ./:/plugin:ro
+      # This plugin. Writable so the test runner can install dev deps; the
+      # gateway is the only OpenClaw container (CLI/tests run via `run --rm`).
+      - ./:/plugin
     healthcheck:
-      test: ["CMD", "node", "dist/index.js", "gateway", "health"]
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:18789/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 30s
 
 volumes:
   openclaw-state:

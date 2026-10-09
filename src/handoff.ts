@@ -12,8 +12,10 @@ import type { SendMessageResult } from "./client.js";
  * Every step is idempotent and durable:
  *  - a handoff record is written before any side effect (suppresses auto-replies)
  *  - each effect is recorded as pending, then marked done with its receipt
- *  - notes/notices carry a deterministic marker so a restart or retry does not
- *    create duplicate messages
+ *  - the private note carries a deterministic internal marker, and the
+ *    customer-facing notice is matched by exact content, so a restart or retry
+ *    does not create duplicate messages. No markers are ever placed in
+ *    customer-visible text.
  */
 
 export interface HandoffClient {
@@ -77,9 +79,19 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
   log.info?.("chatwoot: handoff started", { convKey, reason: base.reason });
 
   const marker = handoffMarker(convKey);
+  const noticeText = config.handoffNotice ?? "";
   const recent = await safeListMessages(client, conversationId, log);
-  const hasMarker = (kind: string) =>
-    recent.some((m) => typeof m.content === "string" && m.content.includes(`${marker} kind=${kind}`));
+  const hasNoteMarker = recent.some(
+    (m) => typeof m.content === "string" && m.content.includes(`${marker} kind=note`)
+  );
+  // The customer notice never carries a marker (it is customer-visible); an
+  // exact-content match against recent public messages is the idempotency check.
+  const hasPublicNotice = recent.some(
+    (m) =>
+      m.private !== true &&
+      typeof m.content === "string" &&
+      m.content.trim() === noticeText.trim()
+  );
 
   // 1. Assign the reception team.
   if (!base.assigned && config.receptionTeamId !== undefined) {
@@ -107,7 +119,7 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
   }
 
   // 2. Private internal note.
-  if (!base.noteSent && !hasMarker("note")) {
+  if (!base.noteSent && !hasNoteMarker) {
     await state.putEffect(convKey, {
       id: "handoff-note",
       kind: "handoff-note",
@@ -129,7 +141,7 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
     await state.setHandoff(convKey, base);
     await state.deleteEffect(convKey, "handoff-note");
     log.info?.("chatwoot: handoff note posted", { convKey, messageId: result.messageId });
-  } else if (hasMarker("note")) {
+  } else if (hasNoteMarker) {
     base.noteSent = true;
     await state.setHandoff(convKey, base);
   }
@@ -137,7 +149,7 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
   // 3. Customer-facing notice (unless OpenClaw already delivered a reply).
   if (deps.suppressCustomerNotice) {
     log.info?.("chatwoot: customer notice suppressed (agent already replied)", { convKey });
-  } else if (!base.customerNoticeSent && !hasMarker("notice")) {
+  } else if (!base.customerNoticeSent && !hasPublicNotice) {
     await state.putEffect(convKey, {
       id: "customer-notice",
       kind: "customer-notice",
@@ -145,17 +157,16 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
       attempts: 1,
       updatedAt: now()
     });
-    const notice = config.handoffNotice ?? "";
     const result = await client.sendMessage({
       conversationId,
-      content: `${marker} kind=notice\n${notice}`,
+      content: noticeText,
       private: false
     });
     base.customerNoticeSent = true;
     await state.setHandoff(convKey, base);
     await state.deleteEffect(convKey, "customer-notice");
     log.info?.("chatwoot: customer notice sent", { convKey, messageId: result.messageId });
-  } else if (hasMarker("notice")) {
+  } else if (hasPublicNotice) {
     base.customerNoticeSent = true;
     await state.setHandoff(convKey, base);
   }

@@ -96,6 +96,21 @@ export class DurableState {
     await this.persist();
   }
 
+  /**
+   * Atomically claim a key for processing.
+   *
+   * The in-memory write happens synchronously (before the first await), so two
+   * concurrent webhook deliveries for the same key cannot both observe an
+   * unclaimed key and both dispatch. Returns false when the key was already
+   * claimed.
+   */
+  async claimProcessed(key: string, at: string = new Date().toISOString()): Promise<boolean> {
+    if (Object.prototype.hasOwnProperty.call(this.data.processed, key)) return false;
+    this.data.processed[key] = at;
+    await this.persist();
+    return true;
+  }
+
   // ---- handoff status ----
 
   getHandoff(convKey: string): HandoffState | undefined {

@@ -90,13 +90,12 @@ export function makeConversationEvent(options: {
   teamId?: number | null;
   status?: string;
 }): Record<string, unknown> {
+  // Real Chatwoot conversation_* payloads are flat (no nested `conversation`).
   return {
     event: options.event ?? "conversation_updated",
     account: { id: options.accountId ?? 1 },
-    conversation: {
-      id: options.conversationId,
-      status: options.status ?? "open",
-      team_id: options.teamId ?? null
-    }
+    id: options.conversationId,
+    status: options.status ?? "open",
+    team_id: options.teamId ?? null
   };
 }

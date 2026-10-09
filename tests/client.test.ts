@@ -18,7 +18,7 @@ const base = {
 
 describe("ChatwootClient", () => {
   it("sends an outgoing message and returns the confirmed receipt id", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ id: 321, content: "hi" }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({ id: 321, content: "hi" }));
     const client = new ChatwootClient({ ...base, fetchImpl: fetchImpl as unknown as typeof fetch });
 
     const result = await client.sendMessage({ conversationId: 55, content: "hi" });
@@ -26,8 +26,8 @@ describe("ChatwootClient", () => {
     expect(result.messageId).toBe(321);
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe("https://chatwoot.test/api/v1/accounts/7/conversations/55/messages");
-    expect((init as RequestInit).headers).toMatchObject({ api_access_token: "tok" });
-    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+    expect(init?.headers).toMatchObject({ api_access_token: "tok" });
+    expect(JSON.parse(String(init?.body))).toEqual({
       content: "hi",
       message_type: "outgoing",
       private: false,
@@ -36,16 +36,16 @@ describe("ChatwootClient", () => {
   });
 
   it("sends a private note when private=true", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ id: 1 }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({ id: 1 }));
     const client = new ChatwootClient({ ...base, fetchImpl: fetchImpl as unknown as typeof fetch });
     await client.sendMessage({ conversationId: 55, content: "note", private: true });
-    const body = JSON.parse(String((fetchImpl.mock.calls[0][1] as RequestInit).body));
+    const body = JSON.parse(String(fetchImpl.mock.calls[0][1]?.body));
     expect(body.private).toBe(true);
   });
 
   it("retries transient 5xx failures then succeeds", async () => {
     const fetchImpl = vi
-      .fn()
+      .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ error: "boom" }, 503))
       .mockResolvedValueOnce(jsonResponse({ id: 9 }));
     const client = new ChatwootClient({ ...base, fetchImpl: fetchImpl as unknown as typeof fetch });

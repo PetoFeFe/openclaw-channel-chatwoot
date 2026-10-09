@@ -18,11 +18,11 @@ Help Center MCP server is untouched (`get_inbox`, `search_kb`, `get_article`).
 ```
 Chatwoot ──webhook──▶ OpenClaw Gateway
                        └─ chatwoot plugin (registerHttpRoute)
-                            ├─ verify HMAC signature
+                            ├─ verify signature (native X-Chatwoot or custom HMAC)
                             ├─ filter outgoing/private/self messages
                             ├─ dedupe by Chatwoot message id (durable)
                             ├─ route session chatwoot:<account_id>:<conversation_id>
-                            ├─ run agent (retry / fallback model)
+                            ├─ run agent (retry; model failover is core-owned)
                             └─ deliver reply via Chatwoot public API (receipt id)
 ```
 
@@ -64,10 +64,8 @@ docker compose up -d         # start the Gateway (one container)
 Install and enable the plugin inside the Gateway container:
 
 ```bash
-docker compose exec openclaw-gateway \
-  node dist/index.js plugins install --link /plugin
-docker compose exec openclaw-gateway \
-  node dist/index.js plugins inspect chatwoot --runtime --json
+docker compose exec openclaw-gateway openclaw plugins install --link /plugin
+docker compose exec openclaw-gateway openclaw plugins inspect chatwoot --runtime --json
 ```
 
 Configure the channel in `openclaw.json` (persisted in the `openclaw-state`
@@ -80,19 +78,24 @@ example. The short version:
     chatwoot: {
       baseUrl: "https://app.chatwoot.com",
       accountId: 1,
-      apiToken: { fromEnv: "CHATWOOT_API_TOKEN" },
-      webhookSecret: { fromEnv: "CHATWOOT_WEBHOOK_SECRET" },
-      receptionTeamId: 1,
-      fallbackModels: ["gpt-4o-mini"]
+      apiToken: "your-api-token",
+      webhookSecret: "your-webhook-secret",
+      receptionTeamId: 1
     }
   }
 }
 ```
 
-Point your Chatwoot webhook at `https://<gateway-host>/chatwoot/webhook`. Because
-Chatwoot does not sign webhooks itself, put the request behind a proxy that adds
-the signature header, or set the shared secret and have your ingress compute
-`HMAC-SHA256(rawBody, CHATWOOT_WEBHOOK_SECRET)` in `x-openclaw-signature`.
+Point your Chatwoot webhook at `https://<gateway-host>/chatwoot/webhook`.
+
+By default (`webhookSignatureMode: "chatwoot"`) the plugin verifies Chatwoot's
+native webhook signature: set the shared **webhook secret** in the Chatwoot
+webhook settings and the plugin verifies `X-Chatwoot-Signature` /
+`X-Chatwoot-Timestamp` on every delivery (with a replay window). Deployments that
+cannot use native signing (e.g. hosting behind a proxy without header
+propagation) can set `webhookSignatureMode: "custom"` and have the ingress put
+`HMAC-SHA256(rawBody, secret)` in `webhookHeader` (default
+`x-openclaw-signature`).
 
 ## Configuration reference
 
@@ -104,15 +107,21 @@ Channel config lives under `channels.chatwoot`. Plugin-level config lives under
 | `baseUrl` | yes | Chatwoot base URL (no trailing slash). |
 | `accountId` | yes | Chatwoot account id. |
 | `apiToken` | yes | Chatwoot user API access token (`api_access_token`). |
-| `webhookSecret` | no | Shared secret for HMAC-SHA256 webhook auth. |
-| `webhookHeader` | no | Signature header (default `x-openclaw-signature`). |
+| `webhookSecret` | yes* | Shared secret. Native mode sig (default). |
+| `webhookSignatureMode` | no | `chatwoot` (default) or `custom`. |
+| `webhookHeader` | no | Signature header, custom mode (default `x-openclaw-signature`). |
+| `webhookTimestampToleranceSec` | no | Native-mode replay window (default 300, 0 = off). |
 | `webhookPath` | no | Gateway route (default `/chatwoot/webhook`). |
 | `receptionTeamId` | no | Team id for human handoff assignment. |
-| `fallbackModels` | no | Ordered fallback models on quota/transient failure. |
+| `fallbackModels` | no | Deprecated (model failover is core-owned via `agents.defaults.model.fallbacks`). |
 | `handoffNotice` | no | Customer-facing notice on handoff. |
 | `handoffNoteTemplate` | no | Private note template (`{session}`, `{conversation}`, `{reason}`). |
 | `maxRetries` | no | Transient retries (default 3). |
 | `allowFrom` / `dmSecurity` | no | DM policy for the channel. |
+
+\* `webhookSecret` is required when `webhookSignatureMode` is `chatwoot`
+(default) or when using custom mode; inbound webhooks without a valid signature
+are rejected with `401`.
 
 ## Failure and handoff flow
 

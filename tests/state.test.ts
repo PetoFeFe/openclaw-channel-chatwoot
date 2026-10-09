@@ -22,6 +22,17 @@ describe("durable state", () => {
     expect(state.isProcessed("msg:1:1")).toBe(true);
   });
 
+  it("atomically claims a key exactly once", async () => {
+    const state = createMemoryState();
+    // Two concurrent claims: exactly one wins.
+    const [a, b] = await Promise.all([
+      state.claimProcessed("msg:1:7"),
+      state.claimProcessed("msg:1:7")
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    await expect(state.claimProcessed("msg:1:7")).resolves.toBe(false);
+  });
+
   it("persists processed events across a restart", async () => {
     const file = tempFile();
     const first = DurableState.open({ filePath: file });

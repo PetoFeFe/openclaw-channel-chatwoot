@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_WEBHOOK_PATH, normalizeChannelConfig } from "../src/types.js";
+import {
+  DEFAULT_WEBHOOK_HEADER,
+  DEFAULT_WEBHOOK_PATH,
+  DEFAULT_WEBHOOK_TOLERANCE_SEC,
+  normalizeChannelConfig
+} from "../src/types.js";
 
 describe("channel config", () => {
   it("normalizes required fields and strips a trailing slash", () => {
@@ -31,5 +36,26 @@ describe("channel config", () => {
     expect(config.receptionTeamId).toBe(5);
     expect(config.fallbackModels).toEqual(["a", "b"]);
     expect(config.maxRetries).toBe(1);
+  });
+
+  it("defaults to native Chatwoot webhook signing", () => {
+    const config = normalizeChannelConfig({ baseUrl: "https://x", accountId: 1, apiToken: "t" });
+    expect(config.webhookSignatureMode).toBe("chatwoot");
+    expect(config.webhookTimestampToleranceSec).toBe(DEFAULT_WEBHOOK_TOLERANCE_SEC);
+    expect(config.webhookHeader).toBe(DEFAULT_WEBHOOK_HEADER);
+  });
+
+  it("supports an explicit custom signature mode", () => {
+    const config = normalizeChannelConfig({
+      baseUrl: "https://x",
+      accountId: 1,
+      apiToken: "t",
+      webhookSignatureMode: "custom",
+      webhookHeader: "x-signature",
+      webhookTimestampToleranceSec: 60
+    });
+    expect(config.webhookSignatureMode).toBe("custom");
+    expect(config.webhookHeader).toBe("x-signature");
+    expect(config.webhookTimestampToleranceSec).toBe(60);
   });
 });

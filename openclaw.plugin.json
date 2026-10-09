@@ -25,12 +25,24 @@
           },
           "webhookSecret": {
             "type": "string",
-            "description": "Shared secret used to authenticate inbound webhooks (HMAC-SHA256 of the raw body, hex, in the configured header)"
+            "description": "Webhook secret. Native mode verifies X-Chatwoot-Signature (HMAC-SHA256 of \"{timestamp}.{raw_body}\"); custom mode verifies HMAC-SHA256 of the raw body in webhookHeader."
+          },
+          "webhookSignatureMode": {
+            "type": "string",
+            "enum": ["chatwoot", "custom"],
+            "default": "chatwoot",
+            "description": "chatwoot (native X-Chatwoot-Signature, default) or custom (body HMAC in webhookHeader)"
           },
           "webhookHeader": {
             "type": "string",
             "default": "x-openclaw-signature",
-            "description": "Header carrying the webhook HMAC signature"
+            "description": "Header carrying the webhook HMAC signature (custom mode only)"
+          },
+          "webhookTimestampToleranceSec": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 300,
+            "description": "Replay window for native signatures in seconds; 0 disables the timestamp check"
           },
           "webhookPath": {
             "type": "string",
@@ -48,7 +60,7 @@
           "fallbackModels": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Ordered fallback models tried on quota exhaustion or transient model failure"
+            "description": "Deprecated: model failover is owned by OpenClaw core (agents.defaults.model.fallbacks). Accepted for backward compatibility but not used for dispatch."
           },
           "handoffNotice": {
             "type": "string",

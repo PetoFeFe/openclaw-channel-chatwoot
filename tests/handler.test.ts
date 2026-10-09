@@ -95,20 +95,75 @@ describe("webhook handler orchestration", () => {
     expect(calls).toBe(2);
   });
 
-  it("falls back to another model on quota exhaustion", async () => {
-    const models: Array<string | undefined> = [];
+  it("delegates model failover to core and never re-dispatches a plugin-chosen model", async () => {
+    const calls: Array<string | undefined> = [];
     const dispatch: Dispatch = async (request) => {
-      models.push(request.model);
-      if (!request.model) return { ok: false, error: { status: 429, code: "insufficient_quota" } };
-      return { ok: true, model: request.model };
+      calls.push(request.model);
+      return { ok: false, error: { status: 429, code: "insufficient_quota" } };
     };
-    const { deps } = setup(dispatch);
+    const { client, deps } = setup(dispatch);
     const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 1, messageId: 1 })),
+      body(makeMessageEvent({ conversationId: 6, messageId: 1 })),
       deps
     );
-    expect(result.action).toBe("dispatched-fallback");
-    expect(models).toEqual([undefined, "gpt-4o-mini"]);
+    expect(result).toMatchObject({ action: "handoff", reason: "quota" });
+    expect(calls).toEqual([undefined]);
+    expect(client.assignments).toHaveLength(1);
+  });
+
+  it("accepts a native Chatwoot signed webhook and rejects a stale timestamp", async () => {
+    const { signChatwootPayload } = await import("../src/webhook.js");
+    const secured = normalizeChannelConfig({
+      ...config,
+      webhookSecret: "s3cret",
+      webhookTimestampToleranceSec: 300
+    });
+    const client = new MockChatwoot();
+    const state = createMemoryState();
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const raw = body(makeMessageEvent({ conversationId: 3, messageId: 7 }));
+    const nowMs = Date.parse("2026-01-01T00:00:00Z");
+    const timestamp = String(Math.floor(nowMs / 1000));
+    const signature = signChatwootPayload(raw, timestamp, "s3cret");
+
+    const ok = await handleWebhookEvent(raw, {
+      config: secured,
+      state,
+      client,
+      dispatch,
+      signatureHeader: signature,
+      timestampHeader: timestamp,
+      now: () => new Date(nowMs)
+    });
+    expect(ok).toMatchObject({ status: 200, action: "dispatched" });
+
+    const stale = await handleWebhookEvent(raw, {
+      config: secured,
+      state: createMemoryState(),
+      client,
+      dispatch,
+      signatureHeader: signature,
+      timestampHeader: timestamp,
+      now: () => new Date(nowMs + 10 * 60 * 1000)
+    });
+    expect(stale).toMatchObject({ status: 401, action: "rejected", reason: "bad-signature" });
+  });
+
+  it("deduplicates replay by X-Chatwoot-Delivery id", async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const { deps } = setup(dispatch);
+    const first = await handleWebhookEvent(
+      body(makeMessageEvent({ conversationId: 4, messageId: 11 })),
+      { ...deps, deliveryId: "delivery-abc" }
+    );
+    // Same delivery id, different message id: only the delivery dedupe applies.
+    const second = await handleWebhookEvent(
+      body(makeMessageEvent({ conversationId: 4, messageId: 12 })),
+      { ...deps, deliveryId: "delivery-abc" }
+    );
+    expect(first.action).toBe("dispatched");
+    expect(second).toMatchObject({ action: "duplicate", reason: "delivery-replayed" });
+    expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
   it("hands off to reception when quota is exhausted and no fallback remains", async () => {

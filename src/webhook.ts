@@ -4,41 +4,50 @@ import type { ChatwootChannelConfig } from "./types.js";
 /**
  * Chatwoot webhook parsing, authentication, and inbound filtering.
  *
- * Chatwoot does not natively sign webhooks, so inbound authentication is done
- * with a shared-secret HMAC-SHA256 over the raw request body, carried in a
- * configurable header. Static bearer tokens are also accepted.
+ * Authentication has two modes:
+ *  - "chatwoot" (default): native signing. Chatwoot sends
+ *      X-Chatwoot-Timestamp: <unix seconds>
+ *      X-Chatwoot-Signature: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{raw_body}")>
+ *      X-Chatwoot-Delivery:  <delivery id, optional>
+ *  - "custom": a shared-secret HMAC-SHA256 over the raw body, carried in a
+ *    configurable header (for deployments behind a signing proxy).
+ *
+ * A static bearer token is never accepted: it cannot be replayed-protected.
  */
 
 export interface ChatwootWebhookMessage extends Record<string, unknown> {
-  event: "message_created";
-  id: number;
+  event: "message_created" | "message_updated";
+  id: number | string;
   content?: string;
   message_type?: "incoming" | "outgoing" | "template";
   private?: boolean;
   content_type?: string;
+  conversation_id?: number | string;
   conversation?: {
-    id?: number;
+    id?: number | string;
     status?: string;
-    team_id?: number | null;
-    inbox_id?: number;
+    team_id?: number | string | null;
+    inbox_id?: number | string;
     [key: string]: unknown;
   };
-  account?: { id?: number; [key: string]: unknown };
-  sender?: { id?: number; type?: string; [key: string]: unknown };
+  account?: { id?: number | string; [key: string]: unknown };
+  sender?: { id?: number | string; type?: string; [key: string]: unknown };
 }
 
 export interface ChatwootWebhookConversation extends Record<string, unknown> {
   event: "conversation_updated" | "conversation_status_changed" | "conversation_created";
-  id?: number;
+  /** Real Chatwoot conversation events are flat: id/status/team_id at the top level. */
+  id?: number | string;
   status?: string;
-  team_id?: number | null;
+  team_id?: number | string | null;
+  changed_attributes?: Record<string, unknown>;
   conversation?: {
-    id?: number;
+    id?: number | string;
     status?: string;
-    team_id?: number | null;
+    team_id?: number | string | null;
     [key: string]: unknown;
   };
-  account?: { id?: number; [key: string]: unknown };
+  account?: { id?: number | string; [key: string]: unknown };
 }
 
 export type ChatwootWebhookEvent = ChatwootWebhookMessage | ChatwootWebhookConversation;
@@ -64,11 +73,15 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-/** Compute the hex HMAC-SHA256 signature of a raw body. */
+/** Compute the hex HMAC-SHA256 signature of a raw body (custom mode). */
 export function signWebhookBody(rawBody: string, secret: string): string {
   return createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
 }
 
+/**
+ * Legacy/custom mode: HMAC-SHA256 over the raw body, hex, optionally prefixed
+ * with "sha256=".
+ */
 export function verifyWebhookSignature(params: {
   rawBody: string;
   secret?: string;
@@ -85,12 +98,70 @@ export function verifyWebhookSignature(params: {
   return safeEqual(provided.trim().toLowerCase(), expected);
 }
 
+/** Native Chatwoot signature: `sha256=` + HMAC-SHA256(secret, "{timestamp}.{body}"). */
+export function signChatwootPayload(
+  rawBody: string,
+  timestamp: string,
+  secret: string
+): string {
+  return `sha256=${createHmac("sha256", secret)
+    .update(`${timestamp}.${rawBody}`, "utf8")
+    .digest("hex")}`;
+}
+
+/**
+ * Verify a native Chatwoot signed webhook.
+ *
+ * Returns true when no secret is configured (auth explicitly disabled), or when
+ * the signature matches and the timestamp is inside the replay window.
+ */
+export function verifyChatwootSignature(params: {
+  rawBody: string;
+  secret?: string;
+  signatureHeader?: string;
+  timestampHeader?: string;
+  toleranceSec?: number;
+  /** Current time in milliseconds. Injectable for deterministic tests. */
+  nowMs?: number;
+}): boolean {
+  const { rawBody, secret, signatureHeader, timestampHeader } = params;
+  if (!secret) return true;
+  if (!signatureHeader || !timestampHeader) return false;
+
+  const tolerance = params.toleranceSec ?? 300;
+  if (tolerance > 0) {
+    const timestamp = Number(timestampHeader);
+    if (!Number.isFinite(timestamp)) return false;
+    const nowSec = (params.nowMs ?? Date.now()) / 1000;
+    if (Math.abs(nowSec - timestamp) > tolerance) return false;
+  }
+
+  const expected = signChatwootPayload(rawBody, timestampHeader, secret);
+  return safeEqual(signatureHeader.trim().toLowerCase(), expected);
+}
+
 export function parseWebhook(rawBody: string): ChatwootWebhookEvent {
   const parsed = JSON.parse(rawBody) as ChatwootWebhookEvent;
-  if (!parsed || typeof parsed !== "object" || typeof (parsed as { event?: unknown }).event !== "string") {
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    typeof (parsed as { event?: unknown }).event !== "string"
+  ) {
     throw new Error("chatwoot: webhook payload missing event");
   }
   return parsed;
+}
+
+function numericId(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  return undefined;
+}
+
+function idString(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.length > 0) return value;
+  return undefined;
 }
 
 /**
@@ -98,12 +169,14 @@ export function parseWebhook(rawBody: string): ChatwootWebhookEvent {
  *
  * Outgoing agent/bot messages and private notes are filtered out to prevent
  * reply loops. Only customer-initiated incoming messages are dispatched.
+ * `message_updated` is handled like `message_created`; dedupe by message id
+ * prevents an edited message from being answered twice.
  */
 export function classifyInbound(
   event: ChatwootWebhookEvent,
   _config?: ChatwootChannelConfig
 ): InboundDecision {
-  if (event.event !== "message_created") {
+  if (event.event !== "message_created" && event.event !== "message_updated") {
     return { action: "ignore", reason: "event-not-message" };
   }
   const msg = event as ChatwootWebhookMessage;
@@ -121,18 +194,18 @@ export function classifyInbound(
   if (!text) {
     return { action: "ignore", reason: "empty-content" };
   }
-  const conversationId = msg.conversation?.id;
-  if (conversationId === undefined || conversationId === null) {
+  const conversationId = idString(msg.conversation?.id ?? msg.conversation_id);
+  if (conversationId === undefined) {
     return { action: "ignore", reason: "missing-conversation" };
   }
   return {
     action: "dispatch",
     reason: "incoming",
-    accountId: String(msg.account?.id ?? ""),
-    conversationId: String(conversationId),
-    messageId: typeof msg.id === "number" ? msg.id : undefined,
+    accountId: idString(msg.account?.id ?? _config?.accountId) ?? "",
+    conversationId,
+    messageId: numericId(msg.id),
     text,
-    senderId: msg.sender?.id !== undefined ? String(msg.sender.id) : undefined,
+    senderId: idString(msg.sender?.id),
     senderType
   };
 }

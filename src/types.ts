@@ -14,8 +14,16 @@ export interface ChatwootChannelConfig {
   apiToken: string;
   /** Shared secret used to authenticate inbound webhooks. */
   webhookSecret?: string;
-  /** Header carrying the webhook HMAC signature. Default x-openclaw-signature. */
+  /**
+   * Signature scheme for inbound webhooks.
+   *  - "chatwoot" (default): native `X-Chatwoot-Signature` / `X-Chatwoot-Timestamp`.
+   *  - "custom": legacy `HMAC-SHA256(rawBody)` in `webhookHeader`.
+   */
+  webhookSignatureMode?: "chatwoot" | "custom";
+  /** Header carrying the custom HMAC signature (custom mode only). */
   webhookHeader?: string;
+  /** Replay window for native signatures, seconds. Default 300; 0 disables. */
+  webhookTimestampToleranceSec?: number;
   /** Gateway HTTP path that receives Chatwoot webhooks. Default /chatwoot/webhook. */
   webhookPath?: string;
   /** Team id that human reception is assigned to. */
@@ -43,6 +51,8 @@ export interface ChatwootPluginConfig {
 
 export const DEFAULT_WEBHOOK_PATH = "/chatwoot/webhook";
 export const DEFAULT_WEBHOOK_HEADER = "x-openclaw-signature";
+export const DEFAULT_WEBHOOK_SIGNATURE_MODE = "chatwoot" as const;
+export const DEFAULT_WEBHOOK_TOLERANCE_SEC = 300;
 export const DEFAULT_HANDOFF_NOTICE =
   "I'm connecting you with a member of our team. A human will continue from here.";
 export const DEFAULT_HANDOFF_NOTE =
@@ -58,12 +68,19 @@ export function normalizeChannelConfig(raw: Record<string, unknown> = {}): Chatw
     throw new Error("chatwoot: accountId is required");
   }
   if (!raw.apiToken) throw new Error("chatwoot: apiToken is required");
+  const signatureMode =
+    raw.webhookSignatureMode === "custom" ? "custom" : DEFAULT_WEBHOOK_SIGNATURE_MODE;
   return {
     baseUrl,
     accountId: raw.accountId as string | number,
     apiToken: String(raw.apiToken),
     webhookSecret: raw.webhookSecret ? String(raw.webhookSecret) : undefined,
+    webhookSignatureMode: signatureMode,
     webhookHeader: raw.webhookHeader ? String(raw.webhookHeader) : DEFAULT_WEBHOOK_HEADER,
+    webhookTimestampToleranceSec:
+      typeof raw.webhookTimestampToleranceSec === "number"
+        ? raw.webhookTimestampToleranceSec
+        : DEFAULT_WEBHOOK_TOLERANCE_SEC,
     webhookPath: raw.webhookPath ? String(raw.webhookPath) : DEFAULT_WEBHOOK_PATH,
     receptionTeamId: raw.receptionTeamId as string | number | undefined,
     receptionTeamName: raw.receptionTeamName ? String(raw.receptionTeamName) : undefined,

@@ -94,4 +94,14 @@ describe("human handoff", () => {
     await resumeHandoff(state, "chatwoot:1:10");
     expect(state.isHandoffActive("chatwoot:1:10")).toBe(false);
   });
+
+  it("never writes an internal marker into the customer-visible notice", async () => {
+    const client = new MockChatwoot();
+    const state = createMemoryState();
+    await performHandoff({ client, state, config, conversationId: 14, convKey: "chatwoot:1:14" });
+    const visible = client.publicMessages();
+    expect(visible).toHaveLength(1);
+    expect(visible[0].content).toBe(config.handoffNotice);
+    expect(visible[0].content).not.toContain("<!--");
+  });
 });
