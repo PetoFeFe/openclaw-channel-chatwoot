@@ -152,6 +152,24 @@ export function parseWebhook(rawBody: string): ChatwootWebhookEvent {
   return parsed;
 }
 
+/**
+ * Account scope: only the configured Chatwoot account is handled.
+ *
+ * Returns true when the event carries no account id or when it matches
+ * `config.accountId`. This makes the deployment env/config the single source of
+ * truth for which account is served, so webhooks from any other account are
+ * ignored instead of being dispatched to the agent.
+ */
+export function isAccountAllowed(
+  event: { account?: { id?: number | string; [key: string]: unknown } },
+  config?: ChatwootChannelConfig
+): boolean {
+  if (!config || config.accountId === undefined || config.accountId === null) return true;
+  const payloadAccountId = event.account?.id;
+  if (payloadAccountId === undefined || payloadAccountId === null) return true;
+  return String(payloadAccountId) === String(config.accountId);
+}
+
 function numericId(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
@@ -174,10 +192,14 @@ function idString(value: unknown): string | undefined {
  */
 export function classifyInbound(
   event: ChatwootWebhookEvent,
-  _config?: ChatwootChannelConfig
+  config?: ChatwootChannelConfig
 ): InboundDecision {
   if (event.event !== "message_created" && event.event !== "message_updated") {
     return { action: "ignore", reason: "event-not-message" };
+  }
+  // Account scope: ignore events for any account other than the configured one.
+  if (!isAccountAllowed(event, config)) {
+    return { action: "ignore", reason: "account-mismatch" };
   }
   const msg = event as ChatwootWebhookMessage;
   if (msg.message_type !== "incoming") {
@@ -198,10 +220,16 @@ export function classifyInbound(
   if (conversationId === undefined) {
     return { action: "ignore", reason: "missing-conversation" };
   }
+  // The configured account is authoritative for the session key; fall back to
+  // the payload (or empty) only when config does not pin an account.
+  const scopedAccountId =
+    config && config.accountId !== undefined && config.accountId !== null
+      ? String(config.accountId)
+      : idString(msg.account?.id) ?? "";
   return {
     action: "dispatch",
     reason: "incoming",
-    accountId: idString(msg.account?.id ?? _config?.accountId) ?? "",
+    accountId: scopedAccountId,
     conversationId,
     messageId: numericId(msg.id),
     text,

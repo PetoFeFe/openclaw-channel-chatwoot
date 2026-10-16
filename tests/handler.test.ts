@@ -79,6 +79,29 @@ describe("webhook handler orchestration", () => {
     ]);
   });
 
+  it("ignores webhooks from a different Chatwoot account", async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const { deps } = setup(dispatch);
+    const result = await handleWebhookEvent(
+      body(makeMessageEvent({ accountId: 99, conversationId: 1, messageId: 7 })),
+      deps
+    );
+    expect(result).toMatchObject({ status: 200, action: "ignored", reason: "account-mismatch" });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("ignores conversation lifecycle events from a different account", async () => {
+    const { state, deps } = setup(vi.fn(async () => ({ ok: true })));
+    // Seed an active handoff on the configured account (1).
+    await state.setHandoff("chatwoot:1:1", { active: true, updatedAt: "2026-01-01T00:00:00.000Z" });
+    const result = await handleConversationEvent(
+      body(makeConversationEvent({ accountId: 99, conversationId: 1, status: "resolved" })),
+      deps
+    );
+    expect(result).toMatchObject({ status: 200, action: "ignored", reason: "account-mismatch" });
+    expect(state.isHandoffActive("chatwoot:1:1")).toBe(true);
+  });
+
   it("retries transient model errors then succeeds", async () => {
     let calls = 0;
     const dispatch: Dispatch = async () => {

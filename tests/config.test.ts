@@ -20,8 +20,28 @@ describe("channel config", () => {
 
   it("requires baseUrl, accountId and apiToken", () => {
     expect(() => normalizeChannelConfig({})).toThrow(/baseUrl/);
-    expect(() => normalizeChannelConfig({ baseUrl: "https://x" })).toThrow(/accountId/);
+    // accountId has an env fallback (CHATWOOT_ACCOUNT_ID); clear it so the
+    // "accountId is required" path is exercised regardless of deployment env.
+    const saved = process.env.CHATWOOT_ACCOUNT_ID;
+    delete process.env.CHATWOOT_ACCOUNT_ID;
+    try {
+      expect(() => normalizeChannelConfig({ baseUrl: "https://x" })).toThrow(/accountId/);
+    } finally {
+      if (saved !== undefined) process.env.CHATWOOT_ACCOUNT_ID = saved;
+    }
     expect(() => normalizeChannelConfig({ baseUrl: "https://x", accountId: 1 })).toThrow(/apiToken/);
+  });
+
+  it("falls back to CHATWOOT_ACCOUNT_ID when accountId is absent", () => {
+    const saved = process.env.CHATWOOT_ACCOUNT_ID;
+    process.env.CHATWOOT_ACCOUNT_ID = "42";
+    try {
+      const config = normalizeChannelConfig({ baseUrl: "https://x", apiToken: "t" });
+      expect(config.accountId).toBe("42");
+    } finally {
+      if (saved === undefined) delete process.env.CHATWOOT_ACCOUNT_ID;
+      else process.env.CHATWOOT_ACCOUNT_ID = saved;
+    }
   });
 
   it("keeps optional handoff and fallback settings", () => {

@@ -57,6 +57,14 @@
             "type": "string",
             "description": "Optional human-readable reception team name (diagnostics only)"
           },
+          "administrationTeamId": {
+            "type": ["integer", "string"],
+            "description": "Chatwoot team id for administration (Level 2). Used to validate agent-requested handoffs."
+          },
+          "administrationTeamName": {
+            "type": "string",
+            "description": "Optional human-readable administration team name (diagnostics only)"
+          },
           "fallbackModels": {
             "type": "array",
             "items": { "type": "string" },
@@ -91,7 +99,8 @@
         "webhookSecret": { "label": "Webhook secret", "sensitive": true },
         "baseUrl": { "label": "Chatwoot base URL", "placeholder": "https://app.chatwoot.com" },
         "accountId": { "label": "Account id" },
-        "receptionTeamId": { "label": "Reception team id" }
+        "receptionTeamId": { "label": "Reception team id" },
+        "administrationTeamId": { "label": "Administration team id" }
       }
     }
   },

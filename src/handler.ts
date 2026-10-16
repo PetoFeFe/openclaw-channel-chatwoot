@@ -13,6 +13,7 @@ import type { DurableState } from "./state.js";
 import type { ChatwootChannelConfig } from "./types.js";
 import {
   classifyInbound,
+  isAccountAllowed,
   parseWebhook,
   verifyChatwootSignature,
   verifyWebhookSignature,
@@ -275,6 +276,11 @@ export async function handleConversationEvent(
     event.event !== "conversation_created"
   ) {
     return { status: 200, action: "ignored", reason: "event-not-conversation" };
+  }
+
+  // Account scope: ignore lifecycle events for any account but the configured one.
+  if (!isAccountAllowed(event, config)) {
+    return { status: 200, action: "ignored", reason: "account-mismatch" };
   }
 
   const inner = event.conversation ?? event;

@@ -104,4 +104,40 @@ describe("human handoff", () => {
     expect(visible[0].content).toBe(config.handoffNotice);
     expect(visible[0].content).not.toContain("<!--");
   });
+
+  it("assigns an agent-requested team and uses the agent-authored notice", async () => {
+    const client = new MockChatwoot();
+    const state = createMemoryState();
+    const result = await performHandoff({
+      client,
+      state,
+      config,
+      conversationId: 20,
+      convKey: "chatwoot:1:20",
+      teamId: 2,
+      reason: "cliente pediu administracao",
+      noticeText: "Vou encaminhar sua solicitacao para a administracao, tudo bem?"
+    });
+    expect(result.teamId).toBe("2");
+    expect(client.assignments).toEqual([{ conversationId: 20, teamId: 2 }]);
+    expect(client.publicMessages()[0].content).toBe(
+      "Vou encaminhar sua solicitacao para a administracao, tudo bem?"
+    );
+    expect(client.privateMessages()).toHaveLength(1);
+  });
+
+  it("falls back to the configured notice when the agent provides none", async () => {
+    const client = new MockChatwoot();
+    const state = createMemoryState();
+    await performHandoff({
+      client,
+      state,
+      config,
+      conversationId: 21,
+      convKey: "chatwoot:1:21",
+      teamId: 1,
+      noticeText: "   "
+    });
+    expect(client.publicMessages()[0].content).toBe(config.handoffNotice);
+  });
 });

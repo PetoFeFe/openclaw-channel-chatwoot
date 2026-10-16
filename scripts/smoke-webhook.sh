@@ -8,13 +8,26 @@
 # Mode "custom" (default) signs the raw body into `x-openclaw-signature`.
 # Mode "chatwoot" uses the native X-Chatwoot-Timestamp / X-Chatwoot-Signature
 # scheme (sha256=HMAC(secret, "{ts}.{raw}")).
+#
+# Env:
+#   SMOKE_URL              gateway base URL              (default http://127.0.0.1:18789)
+#   SMOKE_SECRET           webhook shared secret         (default smoke-secret)
+#   SMOKE_MODE             chatwoot | custom             (default custom)
+#   SMOKE_ACCOUNT_ID       Chatwoot account id to use    (default 3)
+#   SMOKE_CONVERSATION_ID  conversation id for dispatch  (default 55; use a real
+#                          conversation for a true end-to-end delivery)
 set -euo pipefail
 
 URL="${SMOKE_URL:-http://127.0.0.1:18789}"
 SECRET="${SMOKE_SECRET:-smoke-secret}"
+# The node signer snippets read the secret from process.env.S.
+export S="$SECRET"
 MODE="${SMOKE_MODE:-custom}"
-PATH="/chatwoot/webhook"
-readonly EP="$URL$PATH"
+ACCOUNT_ID="${SMOKE_ACCOUNT_ID:-3}"
+CONVERSATION_ID="${SMOKE_CONVERSATION_ID:-55}"
+WRONG_ACCOUNT_ID=$((ACCOUNT_ID + 1000))
+WEBHOOK_PATH="/chatwoot/webhook"
+readonly EP="$URL$WEBHOOK_PATH"
 
 require_node() {
   command -v node >/dev/null 2>&1 || { echo "node is required to compute HMAC signatures" >&2; exit 2; }
@@ -32,13 +45,18 @@ post() { # <body-json> [expected-action] [expected-reason]
   local body="$1" expected="${2:-}"
   local ts="" sig hdr
   if [ "$MODE" = "chatwoot" ]; then
-    read -r ts sig < <(sign_chatwoot "$body")
+    # Command substitution (not process substitution): `< <(...)` can stall in
+    # minimal container shells where the subshell's stdout pipe is not reaped.
+    local sigline
+    sigline=$(sign_chatwoot "$body")
+    ts="${sigline%% *}"
+    sig="${sigline#* }"
     hdr=(-H "x-chatwoot-timestamp: $ts" -H "x-chatwoot-signature: $sig")
   else
     hdr=(-H "x-openclaw-signature: $(sign_custom "$body")")
   fi
   local out
-  out=$(curl -s -m 90 -X POST "$EP" -H 'content-type: application/json' "${hdr[@]}" --data "$body") || {
+  out=$(curl -s -m 180 -X POST "$EP" -H 'content-type: application/json' "${hdr[@]}" --data "$body") || {
     echo "FAIL: curl error for payload: $body" >&2; return 1; }
   echo "  -> $out"
   if [ -n "$expected" ]; then
@@ -56,7 +74,7 @@ smoke() {
   [ "$code" = "401" ] && echo "  -> 401 OK" || { echo "FAIL: expected 401, got $code" >&2; return 1; }
 
   local customer
-  customer='{"event":"message_created","id":9001,"content":"Hello from a mocked customer","message_type":"incoming","private":false,"content_type":"text","conversation_id":55,"conversation":{"id":55,"status":"open"},"account":{"id":1},"sender":{"id":33,"name":"Mock Customer","type":"contact"}}'
+  customer="{\"event\":\"message_created\",\"id\":9001,\"content\":\"Hello from a mocked customer\",\"message_type\":\"incoming\",\"private\":false,\"content_type\":\"text\",\"conversation_id\":${CONVERSATION_ID},\"conversation\":{\"id\":${CONVERSATION_ID},\"status\":\"open\"},\"account\":{\"id\":${ACCOUNT_ID}},\"sender\":{\"id\":33,\"name\":\"Mock Customer\",\"type\":\"contact\"}}"
 
   echo "== signed message_created is dispatched =="
   post "$customer" dispatched
@@ -65,14 +83,19 @@ smoke() {
   post "$customer" duplicate
 
   local edited
-  edited='{"event":"message_updated","id":9002,"content":"edited hello","message_type":"incoming","private":false,"content_type":"text","conversation_id":56,"conversation":{"id":56,"status":"open"},"account":{"id":1},"sender":{"id":33,"name":"Mock Customer","type":"contact"}}'
+  edited="{\"event\":\"message_updated\",\"id\":9002,\"content\":\"edited hello\",\"message_type\":\"incoming\",\"private\":false,\"content_type\":\"text\",\"conversation_id\":${CONVERSATION_ID},\"conversation\":{\"id\":${CONVERSATION_ID},\"status\":\"open\"},\"account\":{\"id\":${ACCOUNT_ID}},\"sender\":{\"id\":33,\"name\":\"Mock Customer\",\"type\":\"contact\"}}"
   echo "== message_updated is handled like message_created =="
   post "$edited" dispatched
 
   local conv
-  conv='{"event":"conversation_updated","id":55,"status":"resolved","team_id":1,"account":{"id":1}}'
+  conv="{\"event\":\"conversation_updated\",\"id\":${CONVERSATION_ID},\"status\":\"resolved\",\"team_id\":1,\"account\":{\"id\":${ACCOUNT_ID}}}"
   echo "== conversation event with no active handoff is ignored =="
   post "$conv" ignored
+
+  local foreign
+  foreign="{\"event\":\"message_created\",\"id\":9003,\"content\":\"foreign account\",\"message_type\":\"incoming\",\"private\":false,\"content_type\":\"text\",\"conversation_id\":${CONVERSATION_ID},\"conversation\":{\"id\":${CONVERSATION_ID},\"status\":\"open\"},\"account\":{\"id\":${WRONG_ACCOUNT_ID}},\"sender\":{\"id\":33,\"name\":\"Mock Customer\",\"type\":\"contact\"}}"
+  echo "== message from a different account is ignored =="
+  post "$foreign" ignored
 }
 
 smoke

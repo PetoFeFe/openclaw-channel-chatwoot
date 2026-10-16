@@ -37,6 +37,9 @@ import {
   type WebhookHandlerDeps
 } from "./src/handler.js";
 import { DurableState } from "./src/state.js";
+import { parseHandoffDirective } from "./src/directive.js";
+import { performHandoff } from "./src/handoff.js";
+import { extractImageUrls } from "./src/media.js";
 import { DEFAULT_WEBHOOK_HEADER, DEFAULT_WEBHOOK_PATH } from "./src/types.js";
 
 type Api = Parameters<NonNullable<Parameters<typeof defineChannelPluginEntry>[0]["registerFull"]>>[0];
@@ -67,6 +70,11 @@ export default defineChannelPluginEntry({
     const dispatch: Dispatch = async (request) => {
       let dispatchError: unknown;
       let deliveredMessageId: number | undefined;
+      // Set when the agent's reply requests a human handoff; the public text is
+      // the handoff notice and is sent by performHandoff instead of as a reply.
+      let handoffRequest:
+        | { teamId?: string; reason?: string; notice: string }
+        | undefined;
 
       // Delivery: core hands us the visible reply; this plugin writes it to
       // Chatwoot and records the confirmed message id as the receipt.
@@ -77,10 +85,30 @@ export default defineChannelPluginEntry({
             : typeof payload?.fallbackText?.text === "string"
               ? payload.fallbackText.text
               : "";
-        if (!text) return;
+        const directive = parseHandoffDirective(text);
+        if (directive) {
+          handoffRequest = {
+            teamId: directive.teamId,
+            reason: directive.reason,
+            notice: directive.notice
+          };
+          return;
+        }
+        // Lift Markdown images (e.g. the pricing table from Knowledge) and any
+        // SDK-provided media out of the reply so Chatwoot receives a real
+        // attachment instead of a dangling "see the image" promise.
+        const extracted = extractImageUrls(text);
+        const mediaUrls = [
+          ...(Array.isArray(payload?.mediaUrls) ? payload.mediaUrls : []),
+          ...(typeof payload?.mediaUrl === "string" ? [payload.mediaUrl] : [])
+        ].filter((url): url is string => typeof url === "string" && url.trim().length > 0);
+        const attachments = [...extracted.images, ...mediaUrls];
+        const caption = extracted.text || (attachments.length > 0 ? " " : "");
+        if (!caption && attachments.length === 0) return;
         const result = await client.sendMessage({
           conversationId: request.conversationId,
-          content: text
+          content: caption,
+          attachments
         });
         if (typeof result.messageId === "number") deliveredMessageId = result.messageId;
       };
@@ -94,7 +122,14 @@ export default defineChannelPluginEntry({
         accountId: request.accountId,
         peer: { kind: "direct", id: request.conversationId }
       });
-      const route = { agentId: agentRoute.agentId, sessionKey: request.sessionKey };
+      // OpenClaw enforces strict multi-agent session ownership: an unscoped
+      // session key cannot be resolved to an agent when several are configured.
+      // Scope the core-facing session key with the routed agent while keeping
+      // the plugin's own (unscoped) key for durable state and Chatwoot calls.
+      const coreSessionKey = request.sessionKey.startsWith("agent:")
+        ? request.sessionKey
+        : `agent:${agentRoute.agentId}:${request.sessionKey}`;
+      const route = { agentId: agentRoute.agentId, sessionKey: coreSessionKey };
 
       const senderAddress = request.senderId ?? request.conversationId;
       const messageSid =
@@ -109,7 +144,7 @@ export default defineChannelPluginEntry({
         CommandBody: request.text,
         From: senderAddress,
         To: `chatwoot:${request.accountId}`,
-        SessionKey: request.sessionKey,
+        SessionKey: coreSessionKey,
         AccountId: request.accountId,
         ChatType: "direct",
         ConversationLabel: request.sessionKey,
@@ -155,14 +190,14 @@ export default defineChannelPluginEntry({
               record: {
                 onRecordError: (error) => {
                   dispatchError ??= error;
-                  api.logger.error?.(`chatwoot: inbound record error: ${describe(error)}`);
+                  api.logger.warn?.(`chatwoot: inbound record error: ${describe(error)}`);
                 }
               },
               delivery: {
                 deliver,
                 onError: (error) => {
                   dispatchError = error;
-                  api.logger.error?.(`chatwoot: agent dispatch error: ${describe(error)}`);
+                  api.logger.warn?.(`chatwoot: agent dispatch error: ${describe(error)}`);
                 }
               },
               replyPipeline,
@@ -172,11 +207,19 @@ export default defineChannelPluginEntry({
         });
       } catch (error) {
         dispatchError = error;
+        api.logger.warn?.(`chatwoot: inbound.run threw: ${describe(error)}`);
       }
 
       const terminalOutcome = turnResult?.dispatched
         ? readAgentRunTerminalOutcome(turnResult.dispatchResult)
         : undefined;
+      if (terminalOutcome === "failed" && turnResult?.dispatched) {
+        const dr = turnResult.dispatchResult as unknown as Record<symbol, unknown>;
+        const terminalError = dr[Symbol.for("openclaw.agentRunTerminalError")];
+        api.logger.warn?.(
+          `chatwoot: agent run failed detail: ${describe(terminalError)}`
+        );
+      }
 
       const delivered = deliveredMessageId !== undefined;
       if (dispatchError) {
@@ -200,7 +243,35 @@ export default defineChannelPluginEntry({
           deliveredTerminalError: delivered
         };
       }
-      if (terminalOutcome === "completed" && !delivered) {
+      // Agent-requested handoff (business policy): assign the requested team,
+      // post the private note, and deliver the agent-authored notice. This runs
+      // instead of a normal reply; `deliveredMessageId` reflects the notice.
+      if (handoffRequest) {
+        try {
+          const targetTeamId = resolveHandoffTeam(handoffRequest.teamId, config);
+          await performHandoff({
+            client,
+            state,
+            config,
+            conversationId: request.conversationId,
+            convKey: request.sessionKey,
+            teamId: targetTeamId,
+            reason: handoffRequest.reason ?? "agent-requested",
+            noticeText: handoffRequest.notice,
+            log: api.logger
+          });
+        } catch (error) {
+          dispatchError = error;
+          return {
+            ok: false,
+            error,
+            deliveredMessageId,
+            delivered,
+            deliveredTerminalError: delivered
+          };
+        }
+      }
+      if (terminalOutcome === "completed" && !delivered && !handoffRequest) {
         // Explicit completion with no visible reply: a silent turn.
         return { ok: true, deliveredMessageId, delivered: false };
       }
@@ -263,6 +334,28 @@ export default defineChannelPluginEntry({
 function describe(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * Resolve the team id for an agent-requested handoff.
+ *
+ * Only teams the deployment knows about are accepted (reception / administration
+ * or an explicit numeric id), so a malformed or prompt-injected directive cannot
+ * assign the conversation to an arbitrary team. Unknown/missing values fall back
+ * to the reception team (Level 1).
+ */
+function resolveHandoffTeam(
+  requested: string | undefined,
+  config: { receptionTeamId?: string | number; administrationTeamId?: string | number }
+): string | number | undefined {
+  const value = requested?.trim();
+  if (!value) return config.receptionTeamId;
+  const known = [config.receptionTeamId, config.administrationTeamId]
+    .filter((team): team is string | number => team !== undefined && team !== null)
+    .map(String);
+  if (known.includes(value)) return value;
+  // Unknown team: fall back to reception rather than trusting arbitrary input.
+  return config.receptionTeamId;
 }
 
 function firstHeader(req: IncomingMessage, name: string): string | undefined {

@@ -26,10 +26,14 @@ export interface ChatwootChannelConfig {
   webhookTimestampToleranceSec?: number;
   /** Gateway HTTP path that receives Chatwoot webhooks. Default /chatwoot/webhook. */
   webhookPath?: string;
-  /** Team id that human reception is assigned to. */
+  /** Team id that human reception is assigned to (Level 1). */
   receptionTeamId?: string | number;
   /** Optional reception team name for diagnostics. */
   receptionTeamName?: string;
+  /** Team id for administration (Level 2). Used to validate agent-requested handoffs. */
+  administrationTeamId?: string | number;
+  /** Optional administration team name for diagnostics. */
+  administrationTeamName?: string;
   /** Ordered fallback models tried on quota exhaustion / transient model failure. */
   fallbackModels?: string[];
   /** Customer-facing notice sent on handoff. */
@@ -64,15 +68,21 @@ export const DEFAULT_TIMEOUT_MS = 15000;
 export function normalizeChannelConfig(raw: Record<string, unknown> = {}): ChatwootChannelConfig {
   const baseUrl = String(raw.baseUrl ?? "").replace(/\/+$/, "");
   if (!baseUrl) throw new Error("chatwoot: baseUrl is required");
-  if (raw.accountId === undefined || raw.accountId === null || raw.accountId === "") {
-    throw new Error("chatwoot: accountId is required");
+  // Account id may come from the channel config or, as a fallback, the
+  // deployment environment (`CHATWOOT_ACCOUNT_ID`). The env var is the single
+  // source of truth for which account this deployment serves.
+  const accountIdRaw = raw.accountId ?? process.env.CHATWOOT_ACCOUNT_ID;
+  if (accountIdRaw === undefined || accountIdRaw === null || accountIdRaw === "") {
+    throw new Error(
+      "chatwoot: accountId is required (set channels.chatwoot.accountId or CHATWOOT_ACCOUNT_ID)"
+    );
   }
   if (!raw.apiToken) throw new Error("chatwoot: apiToken is required");
   const signatureMode =
     raw.webhookSignatureMode === "custom" ? "custom" : DEFAULT_WEBHOOK_SIGNATURE_MODE;
   return {
     baseUrl,
-    accountId: raw.accountId as string | number,
+    accountId: accountIdRaw as string | number,
     apiToken: String(raw.apiToken),
     webhookSecret: raw.webhookSecret ? String(raw.webhookSecret) : undefined,
     webhookSignatureMode: signatureMode,
@@ -84,6 +94,8 @@ export function normalizeChannelConfig(raw: Record<string, unknown> = {}): Chatw
     webhookPath: raw.webhookPath ? String(raw.webhookPath) : DEFAULT_WEBHOOK_PATH,
     receptionTeamId: raw.receptionTeamId as string | number | undefined,
     receptionTeamName: raw.receptionTeamName ? String(raw.receptionTeamName) : undefined,
+    administrationTeamId: raw.administrationTeamId as string | number | undefined,
+    administrationTeamName: raw.administrationTeamName ? String(raw.administrationTeamName) : undefined,
     fallbackModels: Array.isArray(raw.fallbackModels)
       ? (raw.fallbackModels as unknown[]).map(String)
       : undefined,

@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyInbound,
+  isAccountAllowed,
   parseWebhook,
   signChatwootPayload,
   signWebhookBody,
   verifyChatwootSignature,
   verifyWebhookSignature
 } from "../src/webhook.js";
+import type { ChatwootChannelConfig } from "../src/types.js";
 import { makeMessageEvent } from "./helpers.js";
+
+const config = (accountId: string | number): ChatwootChannelConfig => ({
+  baseUrl: "http://chatwoot:3000",
+  accountId,
+  apiToken: "t"
+});
 
 describe("webhook authentication", () => {
   it("accepts a valid HMAC signature", () => {
@@ -144,6 +152,36 @@ describe("webhook parsing and filtering", () => {
       )
     );
     expect(decision).toMatchObject({ action: "dispatch", messageId: 9, conversationId: "5" });
+  });
+
+  it("ignores messages from a different account than configured", () => {
+    const decision = classifyInbound(
+      parseWebhook(JSON.stringify(makeMessageEvent({ accountId: 9, conversationId: 5 }))),
+      config(3)
+    );
+    expect(decision).toMatchObject({ action: "ignore", reason: "account-mismatch" });
+  });
+
+  it("dispatches messages from the configured account and scopes the session key", () => {
+    const decision = classifyInbound(
+      parseWebhook(JSON.stringify(makeMessageEvent({ accountId: 3, conversationId: 5 }))),
+      config(3)
+    );
+    expect(decision).toMatchObject({ action: "dispatch", accountId: "3", conversationId: "5" });
+  });
+
+  it("pins the session account to config even when the payload omits account", () => {
+    const event = makeMessageEvent({ conversationId: 5 });
+    delete event.account;
+    const decision = classifyInbound(parseWebhook(JSON.stringify(event)), config(3));
+    expect(decision).toMatchObject({ action: "dispatch", accountId: "3", conversationId: "5" });
+  });
+
+  it("isAccountAllowed tolerates missing account ids", () => {
+    expect(isAccountAllowed({}, config(3))).toBe(true);
+    expect(isAccountAllowed({ account: { id: 3 } }, config(3))).toBe(true);
+    expect(isAccountAllowed({ account: { id: "3" } }, config(3))).toBe(true);
+    expect(isAccountAllowed({ account: { id: 4 } }, config(3))).toBe(false);
   });
 
   it("tolerates numeric strings for message and conversation ids", () => {

@@ -63,6 +63,57 @@ describe("ChatwootClient", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("uploads image URLs as multipart attachments", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith(".png")) {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "image/png" }
+        });
+      }
+      return jsonResponse({ id: 777, content: "veja" });
+    });
+    const client = new ChatwootClient({ ...base, fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    const result = await client.sendMessage({
+      conversationId: 55,
+      content: "veja",
+      attachments: ["https://chatwoot.test/rails/active_storage/x.png"]
+    });
+
+    expect(result.messageId).toBe(777);
+    const upload = fetchImpl.mock.calls.find(([url]) =>
+      String(url).includes("/conversations/55/messages")
+    );
+    expect(upload).toBeDefined();
+    const init = upload?.[1] as RequestInit;
+    expect(init.body).toBeInstanceOf(FormData);
+    const form = init.body as FormData;
+    expect(form.get("content")).toBe("veja");
+    expect(form.get("message_type")).toBe("outgoing");
+    expect(form.get("attachments[]")).toBeInstanceOf(Blob);
+    // The upload must not preset a content type; fetch adds the multipart boundary.
+    expect(init.headers).toMatchObject({ api_access_token: "tok" });
+  });
+
+  it("falls back to a plain text send when the attachment cannot be fetched", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/rails/")) return new Response("nope", { status: 404 });
+      return jsonResponse({ id: 888, content: "hi" });
+    });
+    const client = new ChatwootClient({ ...base, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const result = await client.sendMessage({
+      conversationId: 55,
+      content: "veja",
+      attachments: ["https://chatwoot.test/rails/active_storage/x.png"]
+    });
+    expect(result.messageId).toBe(888);
+    const send = fetchImpl.mock.calls.find(([url]) => String(url).includes("/conversations/55/messages"));
+    expect(typeof (send?.[1] as RequestInit).body).toBe("string");
+  });
+
   it("classifies Chatwoot 5xx delivery failures", async () => {
     const error = new ChatwootApiError("boom", 500);
     expect(classifyError(error, "chatwoot").class).toBe("delivery");

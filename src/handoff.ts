@@ -45,6 +45,17 @@ export interface HandoffDeps {
   conversationId: string | number;
   convKey: string;
   reason?: string;
+  /**
+   * Team to assign. Defaults to `config.receptionTeamId` (Level 1). The agent
+   * may request the administration team via a handoff directive.
+   */
+  teamId?: string | number;
+  /**
+   * Customer-facing notice. Defaults to `config.handoffNotice`. An
+   * agent-composed notice takes precedence so the customer sees the exact text
+   * the agent authored.
+   */
+  noticeText?: string;
   /** When true, do not send the customer-facing notice (OpenClaw already replied). */
   suppressCustomerNotice?: boolean;
   log?: Logger;
@@ -64,10 +75,13 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
   const now = deps.now ?? (() => new Date().toISOString());
   const log = deps.log ?? {};
 
+  // Agent-requested team wins over the default reception team.
+  const targetTeamId = deps.teamId ?? config.receptionTeamId;
+
   const existing = state.getHandoff(convKey);
   const base: HandoffState = {
     active: true,
-    teamId: config.receptionTeamId !== undefined ? String(config.receptionTeamId) : existing?.teamId,
+    teamId: targetTeamId !== undefined ? String(targetTeamId) : existing?.teamId,
     reason: deps.reason ?? existing?.reason,
     updatedAt: now(),
     assigned: existing?.assigned ?? false,
@@ -79,7 +93,10 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
   log.info?.("chatwoot: handoff started", { convKey, reason: base.reason });
 
   const marker = handoffMarker(convKey);
-  const noticeText = config.handoffNotice ?? "";
+  const noticeText =
+    deps.noticeText && deps.noticeText.trim().length > 0
+      ? deps.noticeText
+      : config.handoffNotice ?? "";
   const recent = await safeListMessages(client, conversationId, log);
   const hasNoteMarker = recent.some(
     (m) => typeof m.content === "string" && m.content.includes(`${marker} kind=note`)
@@ -93,13 +110,13 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
       m.content.trim() === noticeText.trim()
   );
 
-  // 1. Assign the reception team.
-  if (!base.assigned && config.receptionTeamId !== undefined) {
-    const alreadyAssigned = await isAlreadyAssigned(client, conversationId, config.receptionTeamId, log);
+  // 1. Assign the target team.
+  if (!base.assigned && targetTeamId !== undefined) {
+    const alreadyAssigned = await isAlreadyAssigned(client, conversationId, targetTeamId, log);
     if (alreadyAssigned) {
       base.assigned = true;
       await state.setHandoff(convKey, base);
-      log.info?.("chatwoot: reception team already assigned", { convKey });
+      log.info?.("chatwoot: handoff team already assigned", { convKey });
     } else {
       await state.putEffect(convKey, {
         id: "assign-team",
@@ -108,14 +125,14 @@ export async function performHandoff(deps: HandoffDeps): Promise<HandoffState> {
         attempts: 1,
         updatedAt: now()
       });
-      await client.assignTeam(conversationId, config.receptionTeamId);
+      await client.assignTeam(conversationId, targetTeamId);
       base.assigned = true;
       await state.setHandoff(convKey, base);
       await state.deleteEffect(convKey, "assign-team");
-      log.info?.("chatwoot: reception team assigned", { convKey, teamId: config.receptionTeamId });
+      log.info?.("chatwoot: handoff team assigned", { convKey, teamId: targetTeamId });
     }
-  } else if (config.receptionTeamId === undefined) {
-    log.warn?.("chatwoot: receptionTeamId not configured; handoff without assignment", { convKey });
+  } else if (targetTeamId === undefined) {
+    log.warn?.("chatwoot: no handoff team configured; handoff without assignment", { convKey });
   }
 
   // 2. Private internal note.
