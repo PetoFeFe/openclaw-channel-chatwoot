@@ -85,6 +85,12 @@ export default defineChannelPluginEntry({
             : typeof payload?.fallbackText?.text === "string"
               ? payload.fallbackText.text
               : "";
+        if (!text) return;
+        // Suppress OpenClaw core's default English waiting/continuation notices
+        // emitted when subagents (like Knowledge) yield for completion.
+        if (/^I['’]m continuing this work and will send the result when it is ready\.?$/i.test(text.trim())) {
+          return;
+        }
         const directive = parseHandoffDirective(text);
         if (directive) {
           handoffRequest = {
