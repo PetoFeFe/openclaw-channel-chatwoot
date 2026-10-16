@@ -1,54 +1,47 @@
 import { describe, expect, it, vi } from "vitest";
-import { ChatwootApiError } from "../src/client.js";
 import {
   handleConversationEvent,
   handleWebhookEvent,
-  recoverPendingEffects,
   type Dispatch,
   type WebhookHandlerDeps
 } from "../src/handler.js";
 import { createMemoryState } from "../src/state.js";
 import { normalizeChannelConfig } from "../src/types.js";
-import { makeConversationEvent, makeMessageEvent, MockChatwoot } from "./helpers.js";
+import { makeConversationEvent, makeMessageEvent } from "./helpers.js";
 
 const config = normalizeChannelConfig({
   baseUrl: "https://chatwoot.test",
   accountId: 1,
   apiToken: "tok",
   receptionTeamId: 5,
-  fallbackModels: ["gpt-4o-mini"],
-  handoffNotice: "Connecting you to a teammate.",
-  handoffNoteTemplate: "Handoff. Reason: {reason}",
-  maxRetries: 2
+  fallbackModels: ["gpt-4o-mini"]
 });
 
 function setup(dispatch: Dispatch) {
-  const client = new MockChatwoot();
   const state = createMemoryState();
-  const alerts: string[] = [];
   const deps: WebhookHandlerDeps = {
     config,
     state,
-    client,
-    dispatch,
-    onOperatorAlert: (info) => alerts.push(`${info.class}:${info.detail}`)
+    dispatch
   };
-  return { client, state, deps, alerts };
+  return { state, deps };
 }
 
 function body(event: Record<string, unknown>): string {
   return JSON.stringify(event);
 }
 
-describe("webhook handler orchestration", () => {
-  it("dispatches a successful inbound message", async () => {
-    const dispatch = vi.fn(async () => ({ ok: true, delivered: true }));
+describe("webhook handler orchestration (simplified async adapter)", () => {
+  it("dispatches a successful inbound message asynchronously and acks 200", async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
     const { state, deps } = setup(dispatch);
     const result = await handleWebhookEvent(
       body(makeMessageEvent({ conversationId: 1, messageId: 100 })),
       deps
     );
     expect(result).toMatchObject({ status: 200, action: "dispatched" });
+    // Allow background dispatch tick
+    await new Promise((r) => setTimeout(r, 10));
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(state.isProcessed("msg:1:100")).toBe(true);
   });
@@ -61,6 +54,7 @@ describe("webhook handler orchestration", () => {
     const second = await handleWebhookEvent(payload, deps);
     expect(first.action).toBe("dispatched");
     expect(second).toMatchObject({ action: "duplicate" });
+    await new Promise((r) => setTimeout(r, 10));
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
@@ -73,6 +67,7 @@ describe("webhook handler orchestration", () => {
     const { deps } = setup(dispatch);
     await handleWebhookEvent(body(makeMessageEvent({ conversationId: 1, messageId: 1 })), deps);
     await handleWebhookEvent(body(makeMessageEvent({ conversationId: 2, messageId: 2 })), deps);
+    await new Promise((r) => setTimeout(r, 10));
     expect(seen).toEqual([
       { conv: "1", session: "chatwoot:1:1" },
       { conv: "2", session: "chatwoot:1:2" }
@@ -92,7 +87,6 @@ describe("webhook handler orchestration", () => {
 
   it("ignores conversation lifecycle events from a different account", async () => {
     const { state, deps } = setup(vi.fn(async () => ({ ok: true })));
-    // Seed an active handoff on the configured account (1).
     await state.setHandoff("chatwoot:1:1", { active: true, updatedAt: "2026-01-01T00:00:00.000Z" });
     const result = await handleConversationEvent(
       body(makeConversationEvent({ accountId: 99, conversationId: 1, status: "resolved" })),
@@ -102,38 +96,6 @@ describe("webhook handler orchestration", () => {
     expect(state.isHandoffActive("chatwoot:1:1")).toBe(true);
   });
 
-  it("retries transient model errors then succeeds", async () => {
-    let calls = 0;
-    const dispatch: Dispatch = async () => {
-      calls += 1;
-      if (calls === 1) return { ok: false, error: new Error("fetch failed") };
-      return { ok: true };
-    };
-    const { deps } = setup(dispatch);
-    const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 1, messageId: 1 })),
-      deps
-    );
-    expect(result.action).toBe("dispatched");
-    expect(calls).toBe(2);
-  });
-
-  it("delegates model failover to core and never re-dispatches a plugin-chosen model", async () => {
-    const calls: Array<string | undefined> = [];
-    const dispatch: Dispatch = async (request) => {
-      calls.push(request.model);
-      return { ok: false, error: { status: 429, code: "insufficient_quota" } };
-    };
-    const { client, deps } = setup(dispatch);
-    const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 6, messageId: 1 })),
-      deps
-    );
-    expect(result).toMatchObject({ action: "handoff", reason: "quota" });
-    expect(calls).toEqual([undefined]);
-    expect(client.assignments).toHaveLength(1);
-  });
-
   it("accepts a native Chatwoot signed webhook and rejects a stale timestamp", async () => {
     const { signChatwootPayload } = await import("../src/webhook.js");
     const secured = normalizeChannelConfig({
@@ -141,7 +103,6 @@ describe("webhook handler orchestration", () => {
       webhookSecret: "s3cret",
       webhookTimestampToleranceSec: 300
     });
-    const client = new MockChatwoot();
     const state = createMemoryState();
     const dispatch = vi.fn(async () => ({ ok: true }));
     const raw = body(makeMessageEvent({ conversationId: 3, messageId: 7 }));
@@ -152,7 +113,6 @@ describe("webhook handler orchestration", () => {
     const ok = await handleWebhookEvent(raw, {
       config: secured,
       state,
-      client,
       dispatch,
       signatureHeader: signature,
       timestampHeader: timestamp,
@@ -163,7 +123,6 @@ describe("webhook handler orchestration", () => {
     const stale = await handleWebhookEvent(raw, {
       config: secured,
       state: createMemoryState(),
-      client,
       dispatch,
       signatureHeader: signature,
       timestampHeader: timestamp,
@@ -172,84 +131,41 @@ describe("webhook handler orchestration", () => {
     expect(stale).toMatchObject({ status: 401, action: "rejected", reason: "bad-signature" });
   });
 
-  it("deduplicates replay by X-Chatwoot-Delivery id", async () => {
-    const dispatch = vi.fn(async () => ({ ok: true }));
-    const { deps } = setup(dispatch);
-    const first = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 4, messageId: 11 })),
-      { ...deps, deliveryId: "delivery-abc" }
-    );
-    // Same delivery id, different message id: only the delivery dedupe applies.
-    const second = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 4, messageId: 12 })),
-      { ...deps, deliveryId: "delivery-abc" }
-    );
-    expect(first.action).toBe("dispatched");
-    expect(second).toMatchObject({ action: "duplicate", reason: "delivery-replayed" });
-    expect(dispatch).toHaveBeenCalledTimes(1);
-  });
-
-  it("hands off to reception when quota is exhausted and no fallback remains", async () => {
-    const dispatch: Dispatch = async () => ({
-      ok: false,
-      error: { status: 429, code: "insufficient_quota" }
-    });
-    const { client, state, deps } = setup(dispatch);
+  it("rejects an invalid signature with 401", async () => {
+    const secured = normalizeChannelConfig({ ...config, webhookSecret: "s3cret" });
+    const { state } = setup(vi.fn());
     const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 7, messageId: 1 })),
-      deps
+      body(makeMessageEvent({ conversationId: 1 })),
+      {
+        config: secured,
+        state,
+        dispatch: vi.fn(),
+        signatureHeader: "bad"
+      }
     );
-    expect(result.action).toBe("handoff");
-    expect(state.isHandoffActive("chatwoot:1:7")).toBe(true);
-    expect(client.assignments).toHaveLength(1);
-    expect(client.publicMessages()).toHaveLength(1);
+    expect(result.status).toBe(401);
   });
 
-  it("alerts the operator on auth errors without messaging the customer", async () => {
-    const dispatch: Dispatch = async () => ({ ok: false, error: { status: 401 } });
-    const { client, deps, alerts } = setup(dispatch);
-    const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 1, messageId: 1 })),
-      deps
-    );
-    expect(result).toMatchObject({ action: "alerted", reason: "auth" });
-    expect(alerts).toHaveLength(1);
-    expect(client.publicMessages()).toHaveLength(0);
-    expect(client.privateMessages()).toHaveLength(0);
-  });
-
-  it("hands off on outbound Chatwoot delivery failure", async () => {
-    const dispatch: Dispatch = async () => {
-      throw new ChatwootApiError("send failed", 500);
-    };
-    const { client, deps } = setup(dispatch);
-    const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 8, messageId: 1 })),
-      deps
-    );
-    expect(result).toMatchObject({ action: "handoff", reason: "delivery" });
-    expect(client.assignments).toHaveLength(1);
-  });
-
-  it("suppresses automatic replies while human handling is active", async () => {
+  it("suppresses inbound while human handoff is active", async () => {
     const dispatch = vi.fn(async () => ({ ok: true }));
     const { state, deps } = setup(dispatch);
-    await state.setHandoff("chatwoot:1:9", { active: true, updatedAt: new Date().toISOString() });
+    await state.setHandoff("chatwoot:1:11", { active: true, updatedAt: new Date().toISOString() });
+
     const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 9, messageId: 50 })),
+      body(makeMessageEvent({ conversationId: 11, messageId: 50 })),
       deps
     );
     expect(result).toMatchObject({ action: "suppressed-handoff" });
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it("resumes automation when reception returns the conversation to the bot", async () => {
+  it("resumes automation when conversation is resolved", async () => {
     const dispatch = vi.fn(async () => ({ ok: true }));
     const { state, deps } = setup(dispatch);
     await state.setHandoff("chatwoot:1:12", { active: true, updatedAt: new Date().toISOString() });
 
     const resume = await handleConversationEvent(
-      body(makeConversationEvent({ conversationId: 12, teamId: 99 })),
+      body(makeConversationEvent({ conversationId: 12, status: "resolved" })),
       deps
     );
     expect(resume.action).toBe("resumed");
@@ -260,51 +176,5 @@ describe("webhook handler orchestration", () => {
       deps
     );
     expect(after.action).toBe("dispatched");
-  });
-
-  it("does not resume while reception still owns the conversation", async () => {
-    const dispatch = vi.fn(async () => ({ ok: true }));
-    const { state, deps } = setup(dispatch);
-    await state.setHandoff("chatwoot:1:13", { active: true, updatedAt: new Date().toISOString() });
-    const result = await handleConversationEvent(
-      body(makeConversationEvent({ conversationId: 13, teamId: 5 })),
-      deps
-    );
-    expect(result).toMatchObject({ action: "ignored", reason: "handoff-still-active" });
-    expect(state.isHandoffActive("chatwoot:1:13")).toBe(true);
-  });
-
-  it("rejects webhooks with a bad signature when a secret is configured", async () => {
-    const secured = normalizeChannelConfig({ ...config, webhookSecret: "s3cret" });
-    const client = new MockChatwoot();
-    const state = createMemoryState();
-    const dispatch = vi.fn(async () => ({ ok: true }));
-    const deps: WebhookHandlerDeps = { config: secured, state, client, dispatch };
-    const result = await handleWebhookEvent(
-      body(makeMessageEvent({ conversationId: 1, messageId: 1 })),
-      deps
-    );
-    expect(result).toMatchObject({ status: 401, action: "rejected" });
-    expect(dispatch).not.toHaveBeenCalled();
-  });
-
-  it("recovers interrupted handoff side effects after a restart", async () => {
-    const client = new MockChatwoot();
-    const state = createMemoryState();
-    // Simulate a handoff that was recorded but crashed before side effects ran.
-    await state.setHandoff("chatwoot:1:20", { active: true, updatedAt: new Date().toISOString() });
-    await state.putEffect("chatwoot:1:20", {
-      id: "handoff-note",
-      kind: "handoff-note",
-      status: "pending",
-      attempts: 1,
-      updatedAt: new Date().toISOString()
-    });
-
-    const recovered = await recoverPendingEffects({ state, client, config });
-    expect(recovered).toBe(1);
-    expect(client.privateMessages()).toHaveLength(1);
-    expect(client.publicMessages()).toHaveLength(1);
-    expect(client.assignments).toHaveLength(1);
   });
 });

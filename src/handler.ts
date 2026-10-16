@@ -1,13 +1,3 @@
-import { classifyError, type FailureInfo } from "./failure.js";
-import { ChatwootApiError } from "./client.js";
-import { decideFallback } from "./fallback.js";
-import {
-  performHandoff,
-  resumeHandoff,
-  type HandoffClient,
-  type Logger
-} from "./handoff.js";
-import { normalizeAgentResult, type AgentOutcome } from "./model.js";
 import { conversationKey, sessionKey } from "./routing.js";
 import type { DurableState } from "./state.js";
 import type { ChatwootChannelConfig } from "./types.js";
@@ -28,28 +18,24 @@ export interface DispatchRequest {
   text: string;
   messageId?: number;
   senderId?: string;
-  model?: string;
   raw: ChatwootWebhookMessage;
 }
 
-export type Dispatch = (
-  request: DispatchRequest
-) => Promise<AgentOutcome | unknown> | AgentOutcome | unknown;
+export type Dispatch = (request: DispatchRequest) => Promise<unknown> | unknown;
 
 export interface WebhookHandlerDeps {
   config: ChatwootChannelConfig;
   state: DurableState;
-  client: HandoffClient;
   dispatch: Dispatch;
-  /** Value of the configured signature header (native or custom mode). */
   signatureHeader?: string;
-  /** Value of `X-Chatwoot-Timestamp` (native mode). */
   timestampHeader?: string;
-  /** Value of `X-Chatwoot-Delivery`, when present. */
   deliveryId?: string;
-  log?: Logger;
+  log?: {
+    info?: (msg: string, ctx?: Record<string, unknown>) => void;
+    warn?: (msg: string, ctx?: Record<string, unknown>) => void;
+    error?: (msg: string, ctx?: Record<string, unknown>) => void;
+  };
   now?: () => Date;
-  onOperatorAlert?: (info: { class: string; detail: string; convKey?: string }) => void;
 }
 
 export interface WebhookHandlerResult {
@@ -71,18 +57,22 @@ function verifyInbound(rawBody: string, deps: WebhookHandlerDeps): boolean {
   return verifyChatwootSignature({
     rawBody,
     secret: config.webhookSecret,
-    signatureHeader: deps.signatureHeader,
     timestampHeader: deps.timestampHeader,
+    signatureHeader: deps.signatureHeader,
     toleranceSec: config.webhookTimestampToleranceSec,
     nowMs: deps.now ? deps.now().getTime() : undefined
   });
 }
 
-export async function handleWebhookEvent(
+/**
+ * Validates, authenticates, and deduplicates the incoming webhook.
+ * Returns the HTTP response acknowledgment and the validated request.
+ */
+export async function prepareInboundAck(
   rawBody: string,
   deps: WebhookHandlerDeps
-): Promise<WebhookHandlerResult> {
-  const { config, state, client } = deps;
+): Promise<WebhookHandlerResult & { request?: DispatchRequest }> {
+  const { config, state } = deps;
   const log = deps.log ?? {};
   const nowIso = () => (deps.now ? deps.now() : new Date()).toISOString();
 
@@ -92,13 +82,13 @@ export async function handleWebhookEvent(
     return { status: 401, action: "rejected", reason: "bad-signature" };
   }
 
-  // 1b. Delivery-id replay dedupe (independent of message-id dedupe).
+  // 1b. Delivery-id replay dedupe.
   if (deps.deliveryId) {
     const ok = await state.claimProcessed(`delivery:${deps.deliveryId}`, nowIso());
     if (!ok) return { status: 200, action: "duplicate", reason: "delivery-replayed" };
   }
 
-  // 2. Parse.
+  // 2. Parse payload.
   let event;
   try {
     event = parseWebhook(rawBody);
@@ -107,7 +97,7 @@ export async function handleWebhookEvent(
     return { status: 400, action: "rejected", reason: "malformed" };
   }
 
-  // 3. Filter outgoing/private/self messages.
+  // 3. Filter outgoing/private/self messages & verify accountId.
   const decision = classifyInbound(event, config);
   if (decision.action === "ignore") {
     return { status: 200, action: "ignored", reason: decision.reason };
@@ -117,9 +107,7 @@ export async function handleWebhookEvent(
   const conversationId = decision.conversationId as string;
   const convKey = conversationKey(accountId, conversationId);
 
-  // 4. Deduplicate by Chatwoot message id. The claim is atomic and persisted
-  //    before dispatch, so a concurrent webhook or a restart cannot process the
-  //    same message twice.
+  // 4. Deduplicate by Chatwoot message id.
   if (decision.messageId !== undefined) {
     const msgKey = `msg:${accountId}:${decision.messageId}`;
     const claimed = await state.claimProcessed(msgKey, nowIso());
@@ -133,123 +121,33 @@ export async function handleWebhookEvent(
     return { status: 200, action: "suppressed-handoff", reason: "human-handoff-active" };
   }
 
-  // 6. Run the agent, applying retry / fallback-model / handoff policy.
   const raw = event as ChatwootWebhookMessage;
-  const result = await runAgentWithPolicy(
-    {
-      accountId,
-      conversationId,
-      sessionKey: sessionKey(accountId, conversationId),
-      text: decision.text as string,
-      messageId: decision.messageId,
-      senderId: decision.senderId,
-      raw
-    },
-    convKey,
-    deps
-  );
-  return result;
+  const request: DispatchRequest = {
+    accountId,
+    conversationId,
+    sessionKey: sessionKey(accountId, conversationId),
+    text: decision.text as string,
+    messageId: decision.messageId,
+    senderId: decision.senderId,
+    raw
+  };
+
+  return { status: 200, action: "dispatched", request };
 }
 
-async function runAgentWithPolicy(
-  request: DispatchRequest,
-  convKey: string,
+export async function handleWebhookEvent(
+  rawBody: string,
   deps: WebhookHandlerDeps
 ): Promise<WebhookHandlerResult> {
-  const { config, state, client } = deps;
-  const log = deps.log ?? {};
-  const now = deps.now ?? (() => new Date());
-  const maxRetries = config.maxRetries ?? 3;
-
-  let transientLeft = maxRetries;
-  const guard = maxRetries + 3;
-
-  for (let attempt = 0; attempt < guard; attempt += 1) {
-    let outcome: AgentOutcome;
-    try {
-      outcome = normalizeAgentResult(await deps.dispatch(request));
-    } catch (error) {
-      outcome = { ok: false, error };
-    }
-
-    if (outcome.ok) {
-      log.info?.("chatwoot: agent reply delivered", {
-        convKey,
-        messageId: outcome.deliveredMessageId
-      });
-      return { status: 200, action: "dispatched" };
-    }
-
-    const info = resolveFailure(outcome);
-    log.warn?.("chatwoot: agent run failed", {
-      convKey,
-      class: info.class,
-      status: info.status,
-      detail: info.operatorDetail
-    });
-
-    if (info.class === "transient" && transientLeft > 0) {
-      transientLeft -= 1;
-      continue;
-    }
-
-    // Model failover is owned by OpenClaw core
-    // (`agents.defaults.model.fallbacks`); it already tried its chain within the
-    // single dispatch above. The plugin only maps the terminal class to a
-    // retry/alert/handoff action and never re-dispatches with a chosen model.
-    const decision = decideFallback(info, { fallbackModels: [] }, { tried: ["__core__"] });
-    if (decision.action === "alert") {
-      // Never expose provider/config errors to the customer.
-      deps.onOperatorAlert?.({
-        class: info.class,
-        detail: info.operatorDetail,
-        convKey
-      });
-      log.error?.("chatwoot: operator action required", { convKey, detail: info.operatorDetail });
-      return { status: 200, action: "alerted", reason: info.class };
-    }
-
-    // Handoff to reception.
-    await performHandoff({
-      client,
-      state,
-      config,
-      conversationId: request.conversationId,
-      convKey,
-      reason: info.class,
-      suppressCustomerNotice: outcome.deliveredTerminalError === true,
-      log,
-      now: () => now().toISOString()
-    });
-    return { status: 200, action: "handoff", reason: info.class };
+  const ack = await prepareInboundAck(rawBody, deps);
+  if (ack.action === "dispatched" && ack.request) {
+    await deps.dispatch(ack.request);
   }
-
-  await performHandoff({
-    client,
-    state,
-    config,
-    conversationId: request.conversationId,
-    convKey,
-    reason: "retry-exhausted",
-    log,
-    now: () => now().toISOString()
-  });
-  return { status: 200, action: "handoff", reason: "retry-exhausted" };
-}
-
-function resolveFailure(outcome: AgentOutcome): FailureInfo {
-  const source = outcome.error instanceof ChatwootApiError ? "chatwoot" : "agent";
-  const info = classifyError(outcome.error, source);
-  if (outcome.quotaExhausted && info.class !== "quota") {
-    return { ...info, class: "quota", retryable: false };
-  }
-  return info;
+  return { status: ack.status, action: ack.action, reason: ack.reason };
 }
 
 /**
- * Handle conversation lifecycle events to implement explicit, verified resume:
- * reception returning the conversation to the bot (team reassigned away from
- * reception, or conversation resolved) re-enables automatic replies.
+ * Handle conversation lifecycle events (e.g. status changed to resolved).
  */
 export async function handleConversationEvent(
   rawBody: string,
@@ -278,7 +176,6 @@ export async function handleConversationEvent(
     return { status: 200, action: "ignored", reason: "event-not-conversation" };
   }
 
-  // Account scope: ignore lifecycle events for any account but the configured one.
   if (!isAccountAllowed(event, config)) {
     return { status: 200, action: "ignored", reason: "account-mismatch" };
   }
@@ -286,22 +183,23 @@ export async function handleConversationEvent(
   const inner = event.conversation ?? event;
   const conversationId = inner.id;
   if (conversationId === undefined || conversationId === null) {
-    return { status: 200, action: "ignored", reason: "missing-conversation" };
+    return { status: 200, action: "ignored", reason: "conversation-id-missing" };
   }
+
   const accountId = String(event.account?.id ?? config.accountId);
-  const convKey = conversationKey(accountId, String(conversationId));
+  const convKey = conversationKey(accountId, conversationId);
 
   if (!state.isHandoffActive(convKey)) {
     return { status: 200, action: "ignored", reason: "no-active-handoff" };
   }
 
-  if (!isResumeSignal(inner.team_id, inner.status, config)) {
-    return { status: 200, action: "ignored", reason: "handoff-still-active" };
+  if (isResumeSignal(inner.team_id, inner.status, config)) {
+    await state.setHandoff(convKey, { active: false, updatedAt: now() });
+    log.info?.("chatwoot: handoff resumed; automatic replies re-enabled", { convKey });
+    return { status: 200, action: "resumed" };
   }
 
-  await resumeHandoff(state, convKey, now);
-  log.info?.("chatwoot: handoff resumed; automatic replies re-enabled", { convKey });
-  return { status: 200, action: "resumed" };
+  return { status: 200, action: "ignored", reason: "handoff-still-active" };
 }
 
 function isResumeSignal(
@@ -309,46 +207,7 @@ function isResumeSignal(
   status: string | undefined,
   config: ChatwootChannelConfig
 ): boolean {
-  // Reception returns the conversation to the bot by reassigning the team.
-  if (teamId !== undefined && teamId !== null && config.receptionTeamId !== undefined) {
-    if (String(teamId) !== String(config.receptionTeamId)) return true;
-  }
-  if (teamId === null && config.receptionTeamId !== undefined) {
-    // Team cleared entirely: treat as returned to the bot.
-    return true;
-  }
   if (status === "resolved") return true;
+  if (teamId === null && config.receptionTeamId !== undefined) return true;
   return false;
-}
-
-/**
- * Startup recovery: finish any handoff whose side effects were interrupted by a
- * restart. Idempotent (markers + recorded status prevent duplicate notes/notices).
- */
-export async function recoverPendingEffects(deps: {
-  state: DurableState;
-  client: HandoffClient;
-  config: ChatwootChannelConfig;
-  log?: Logger;
-}): Promise<number> {
-  const { state, client, config, log } = deps;
-  let recovered = 0;
-  // Enumerate conversations known to the state store that still have pending effects.
-  for (const convKey of state.pendingConversationKeys()) {
-    if (state.listEffects(convKey).some((effect) => effect.status === "pending")) {
-      const parts = convKey.split(":");
-      const conversationId = parts[parts.length - 1];
-      await performHandoff({
-        client,
-        state,
-        config,
-        conversationId,
-        convKey,
-        reason: "restart-recovery",
-        log
-      });
-      recovered += 1;
-    }
-  }
-  return recovered;
 }
