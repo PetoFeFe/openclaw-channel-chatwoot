@@ -13,6 +13,8 @@
  */
 
 const MARKDOWN_IMAGE = /!\[[^\]]*\]\(\s*(https?:\/\/[^\s)]+)\s*\)/g;
+const MEDIA_PREFIX_IMAGE = /(?:^|\n)\s*MEDIA:\s*(https?:\/\/[^\s)]+)/gi;
+const BARE_IMAGE_LINE = /(?:^|\n)\s*(https?:\/\/[^\s)]+?\/(?:rails\/active_storage\/[^\s)]+|[^\s)]+?\.(?:png|jpe?g|webp|gif))(?:\?[^\s)]*)?)\s*(?=\n|$)/gi;
 
 export interface ExtractedImages {
   /** Remaining caption text with Markdown image tokens removed. */
@@ -24,6 +26,14 @@ export interface ExtractedImages {
 export function extractImageUrls(input: string): ExtractedImages {
   const images: string[] = [];
   let text = input.replace(MARKDOWN_IMAGE, (_match, url: string) => {
+    images.push(url);
+    return "";
+  });
+  text = text.replace(MEDIA_PREFIX_IMAGE, (_match, url: string) => {
+    images.push(url);
+    return "";
+  });
+  text = text.replace(BARE_IMAGE_LINE, (_match, url: string) => {
     images.push(url);
     return "";
   });

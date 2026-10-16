@@ -10,6 +10,26 @@ describe("extractImageUrls", () => {
     expect(text).toBe("Segue a tabela em imagem também:\n\nBora fechar?");
   });
 
+  it("lifts MEDIA: prefixed image URLs", () => {
+    const input =
+      "Vou mandar a tabela de novo agora 👇\n\nMEDIA:https://chatwoot.test/rails/active_storage/blobs/redirect/abc/image.png";
+    const { text, images } = extractImageUrls(input);
+    expect(images).toEqual([
+      "https://chatwoot.test/rails/active_storage/blobs/redirect/abc/image.png"
+    ]);
+    expect(text).toBe("Vou mandar a tabela de novo agora 👇");
+  });
+
+  it("lifts bare active storage image links on their own line", () => {
+    const input =
+      "Segue a tabela:\nhttps://chatwoot.test/rails/active_storage/blobs/redirect/xyz/image.png\nQualquer dúvida me chama!";
+    const { text, images } = extractImageUrls(input);
+    expect(images).toEqual([
+      "https://chatwoot.test/rails/active_storage/blobs/redirect/xyz/image.png"
+    ]);
+    expect(text).toBe("Segue a tabela:\nQualquer dúvida me chama!");
+  });
+
   it("leaves bare links untouched", () => {
     const input = "Veja https://example.com/precos para mais detalhes";
     const { text, images } = extractImageUrls(input);
