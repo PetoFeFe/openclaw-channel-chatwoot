@@ -23,10 +23,17 @@ export interface DispatchRequest {
 
 export type Dispatch = (request: DispatchRequest) => Promise<unknown> | unknown;
 
+/** Serializes and coalesces agent turns per conversation (see src/queue.ts). */
+export interface TurnLane {
+  run(convKey: string, request: DispatchRequest): Promise<void>;
+}
+
 export interface WebhookHandlerDeps {
   config: ChatwootChannelConfig;
   state: DurableState;
   dispatch: Dispatch;
+  /** Optional per-conversation lane; when present, turns are serialized. */
+  lanes?: TurnLane;
   signatureHeader?: string;
   timestampHeader?: string;
   deliveryId?: string;
@@ -141,9 +148,27 @@ export async function handleWebhookEvent(
 ): Promise<WebhookHandlerResult> {
   const ack = await prepareInboundAck(rawBody, deps);
   if (ack.action === "dispatched" && ack.request) {
-    await deps.dispatch(ack.request);
+    // Keep the turn inside the caller's async scope so the Gateway root task
+    // stays admitted for the whole agent run (avoids GatewayDrainingError).
+    await dispatchAdmitted(ack.request, deps);
   }
   return { status: ack.status, action: ack.action, reason: ack.reason };
+}
+
+/**
+ * Dispatch an already-validated inbound request, honouring the per-conversation
+ * lane when one is configured. Never re-runs signature or dedupe checks, so it
+ * is safe to call after `prepareInboundAck` has already claimed the message.
+ */
+export async function dispatchAdmitted(
+  request: DispatchRequest,
+  deps: WebhookHandlerDeps
+): Promise<void> {
+  if (deps.lanes) {
+    await deps.lanes.run(conversationKey(request.accountId, request.conversationId), request);
+    return;
+  }
+  await deps.dispatch(request);
 }
 
 /**

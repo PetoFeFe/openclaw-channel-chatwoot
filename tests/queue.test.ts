@@ -1,0 +1,122 @@
+import { describe, expect, it } from "vitest";
+import type { DispatchRequest } from "../src/handler.js";
+import { ConversationLanes } from "../src/queue.js";
+
+function makeRequest(conversationId: string, text: string): DispatchRequest {
+  return {
+    accountId: "1",
+    conversationId,
+    sessionKey: `chatwoot:1:${conversationId}`,
+    text,
+    messageId: 1,
+    senderId: "1",
+    raw: { event: "message_created", id: 1 } as unknown as DispatchRequest["raw"]
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+describe("ConversationLanes", () => {
+  it("serializes turns for the same conversation", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const seen: string[] = [];
+    const lanes = new ConversationLanes({
+      settleMs: 0,
+      dispatch: async (turn) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        seen.push(turn.text);
+        await delay(10);
+        active -= 1;
+      }
+    });
+
+    await Promise.all([
+      lanes.run("chatwoot:1:1", makeRequest("1", "first")),
+      lanes.run("chatwoot:1:1", makeRequest("1", "second"))
+    ]);
+
+    expect(maxActive).toBe(1);
+    expect(seen).toEqual(["first", "second"]);
+  });
+
+  it("coalesces a rapid burst into a single turn", async () => {
+    const calls: string[] = [];
+    const lanes = new ConversationLanes({
+      settleMs: 25,
+      dispatch: async (turn) => {
+        calls.push(turn.text);
+      }
+    });
+
+    await Promise.all([
+      lanes.run("chatwoot:1:1", makeRequest("1", "Oi")),
+      lanes.run("chatwoot:1:1", makeRequest("1", "Bom dia"))
+    ]);
+
+    expect(calls).toEqual(["Oi\nBom dia"]);
+  });
+
+  it("runs different conversations concurrently", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const lanes = new ConversationLanes({
+      settleMs: 0,
+      dispatch: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await delay(10);
+        active -= 1;
+      }
+    });
+
+    await Promise.all([
+      lanes.run("chatwoot:1:1", makeRequest("1", "a")),
+      lanes.run("chatwoot:1:2", makeRequest("2", "b"))
+    ]);
+
+    expect(maxActive).toBe(2);
+  });
+
+  it("does not hang callers when a dispatch fails and keeps the lane usable", async () => {
+    const errors: string[] = [];
+    const calls: string[] = [];
+    let shouldFail = true;
+    const lanes = new ConversationLanes({
+      settleMs: 0,
+      log: { error: (msg) => errors.push(msg) },
+      dispatch: async (turn) => {
+        calls.push(turn.text);
+        if (shouldFail) {
+          shouldFail = false;
+          throw new Error("boom");
+        }
+      }
+    });
+
+    await lanes.run("chatwoot:1:1", makeRequest("1", "first"));
+    await lanes.run("chatwoot:1:1", makeRequest("1", "second"));
+
+    expect(calls).toEqual(["first", "second"]);
+    expect(errors).toContain("chatwoot: lane dispatch failed");
+    expect(lanes.pending("chatwoot:1:1")).toBe(0);
+  });
+
+  it("dispatches each message separately when coalescing is disabled", async () => {
+    const calls: string[] = [];
+    const lanes = new ConversationLanes({
+      settleMs: 0,
+      dispatch: async (turn) => {
+        calls.push(turn.text);
+      }
+    });
+
+    await lanes.run("chatwoot:1:1", makeRequest("1", "one"));
+    await lanes.run("chatwoot:1:1", makeRequest("1", "two"));
+
+    expect(calls).toEqual(["one", "two"]);
+  });
+});

@@ -2,7 +2,7 @@
   "id": "chatwoot",
   "name": "Chatwoot",
   "description": "Native OpenClaw channel plugin for Chatwoot. Chatwoot stays the source of truth for conversations and human support; OpenClaw handles AI execution.",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "channels": ["chatwoot"],
   "categories": ["channels"],
   "channelConfigs": {
@@ -111,6 +111,12 @@
       "stateDir": {
         "type": "string",
         "description": "Directory for durable plugin state (processed events, handoff status, pending effects)"
+      },
+      "settleMs": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 800,
+        "description": "Coalescing window (ms) for rapid messages in the same Chatwoot conversation before a single agent turn is run. Set 0 to disable coalescing while keeping per-conversation serialization."
       },
       "timeoutMs": {
         "type": "integer",

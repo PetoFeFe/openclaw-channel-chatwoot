@@ -6,7 +6,8 @@
  *   2. Deduplicates incoming messages via durable state.
  *   3. Filters account scope and incoming/private message flags.
  *   4. Acknowledges HTTP 200 immediately to Chatwoot so webhooks never time out.
- *   5. Dispatches the agent turn within the root task scope.
+ *   5. Runs the agent turn inside the handler, serialized and coalesced per
+ *      conversation by a lane so a message burst never starts two turns.
  *
  * The agent itself (Tata) owns reading Help Center articles and posting
  * replies back to Chatwoot using the Chatwoot CLI/tools. The plugin never
@@ -21,6 +22,7 @@ import {
   resolveChatwootConfig
 } from "./src/channel.js";
 import {
+  dispatchAdmitted,
   handleConversationEvent,
   prepareInboundAck,
   type Dispatch,
@@ -28,6 +30,7 @@ import {
 } from "./src/handler.js";
 import { DurableState } from "./src/state.js";
 import { DEFAULT_WEBHOOK_HEADER, DEFAULT_WEBHOOK_PATH } from "./src/types.js";
+import { ConversationLanes } from "./src/queue.js";
 
 type Api = Parameters<NonNullable<Parameters<typeof defineChannelPluginEntry>[0]["registerFull"]>>[0];
 
@@ -40,7 +43,11 @@ export default defineChannelPluginEntry({
   plugin: chatwootPlugin,
   registerFull(api: Api) {
     const config = resolveChatwootConfig(api.config);
-    const pluginConfig = (api.pluginConfig ?? {}) as { stateDir?: string; timeoutMs?: number };
+    const pluginConfig = (api.pluginConfig ?? {}) as {
+      stateDir?: string;
+      timeoutMs?: number;
+      settleMs?: number;
+    };
     const stateDir =
       pluginConfig.stateDir ?? process.env.OPENCLAW_CHATWOOT_STATE_DIR ?? api.resolvePath(".state");
     const state = DurableState.open({ filePath: join(stateDir, "chatwoot-state.json") });
@@ -125,10 +132,17 @@ Customer: ${request.text}`;
       return { ok: true };
     };
 
+    const lanes = new ConversationLanes({
+      dispatch,
+      settleMs: pluginConfig.settleMs,
+      log: api.logger
+    });
+
     const deps: WebhookHandlerDeps = {
       config,
       state,
       dispatch,
+      lanes,
       log: api.logger
     };
 
@@ -174,13 +188,11 @@ Customer: ${request.text}`;
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ ok: ack.status === 200, action: ack.action, reason: ack.reason }));
 
-        // 3. Keep execution inside this root task so Gateway admission stays open
+        // 3. Run the agent turn inside this handler so the Gateway root task
+        //    stays admitted for the whole run. The lane serializes + coalesces
+        //    turns per conversation so bursts never start concurrent turns.
         if (ack.action === "dispatched" && ack.request) {
-          try {
-            await deps.dispatch(ack.request);
-          } catch (err) {
-            api.logger.warn?.("chatwoot: dispatch error: " + (err as Error).message);
-          }
+          await dispatchAdmitted(ack.request, eventDeps);
         }
       }
     });
