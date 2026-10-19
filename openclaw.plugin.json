@@ -2,7 +2,7 @@
   "id": "chatwoot",
   "name": "Chatwoot",
   "description": "Native OpenClaw channel plugin for Chatwoot. Chatwoot stays the source of truth for conversations and human support; OpenClaw handles AI execution.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "channels": ["chatwoot"],
   "categories": ["channels"],
   "channelConfigs": {

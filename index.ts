@@ -47,6 +47,7 @@ export default defineChannelPluginEntry({
       stateDir?: string;
       timeoutMs?: number;
       settleMs?: number;
+      dispatchRetries?: number;
     };
     const stateDir =
       pluginConfig.stateDir ?? process.env.OPENCLAW_CHATWOOT_STATE_DIR ?? api.resolvePath(".state");
@@ -135,6 +136,7 @@ Customer: ${request.text}`;
     const lanes = new ConversationLanes({
       dispatch,
       settleMs: pluginConfig.settleMs,
+      dispatchRetries: pluginConfig.dispatchRetries,
       log: api.logger
     });
 

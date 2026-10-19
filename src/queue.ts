@@ -37,10 +37,31 @@ export interface ConversationLanesOptions {
    * arrives) while keeping serialization.
    */
   settleMs?: number;
+  /**
+   * Maximum dispatch attempts for one batch when the Gateway reports that it is
+   * temporarily draining (`GatewayDrainingError`). The Gateway closes work
+   * admission for short windows (suspend / restart); such a turn was never
+   * started, so it is safe to retry. `1` disables retries.
+   */
+  dispatchRetries?: number;
+  /** Backoff between dispatch retries, in milliseconds. Defaults to exponential. */
+  retryBackoffMs?: (attempt: number) => number;
   log?: LaneLog;
 }
 
 export const DEFAULT_SETTLE_MS = 800;
+export const DEFAULT_DISPATCH_RETRIES = 5;
+
+/** True when the error is the Gateway's transient admission/drain rejection. */
+export function isGatewayDrainingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /gateway is draining|draining for restart/i.test(message);
+}
+
+/** Exponential backoff between dispatch retries: 400, 800, 1600, … capped at 10s. */
+export function defaultRetryBackoffMs(attempt: number): number {
+  return Math.min(10_000, 400 * 2 ** (attempt - 1));
+}
 
 interface QueueEntry {
   request: DispatchRequest;
@@ -56,11 +77,15 @@ export class ConversationLanes {
   private readonly lanes = new Map<string, Lane>();
   private readonly dispatch: Dispatch;
   private readonly settleMs: number;
+  private readonly dispatchRetries: number;
+  private readonly retryBackoffMs: (attempt: number) => number;
   private readonly log: LaneLog;
 
   constructor(options: ConversationLanesOptions) {
     this.dispatch = options.dispatch;
     this.settleMs = Math.max(0, options.settleMs ?? DEFAULT_SETTLE_MS);
+    this.dispatchRetries = Math.max(1, options.dispatchRetries ?? DEFAULT_DISPATCH_RETRIES);
+    this.retryBackoffMs = options.retryBackoffMs ?? defaultRetryBackoffMs;
     this.log = options.log ?? {};
   }
 
@@ -116,14 +141,44 @@ export class ConversationLanes {
   private async dispatchBatch(convKey: string, batch: QueueEntry[]): Promise<void> {
     const request = combineRequests(batch.map((entry) => entry.request));
     try {
-      await this.dispatch(request);
-    } catch (error) {
-      this.log.error?.("chatwoot: lane dispatch failed", {
-        conversationKey: convKey,
-        error: (error as Error).message
-      });
+      await this.dispatchWithRetry(convKey, request);
     } finally {
       for (const entry of batch) entry.done();
+    }
+  }
+
+  /**
+   * Dispatch a batch, retrying with backoff while the Gateway is draining.
+   *
+   * The Gateway closes work admission for short windows (suspend / restart) and
+   * rejects new tasks with `GatewayDrainingError`. Nothing has run yet when that
+   * is thrown, so the turn can safely be retried; failing fast would leave the
+   * customer's acked message unanswered.
+   */
+  private async dispatchWithRetry(convKey: string, request: DispatchRequest): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.dispatch(request);
+        return;
+      } catch (error) {
+        const draining = isGatewayDrainingError(error);
+        if (draining && attempt < this.dispatchRetries) {
+          this.log.warn?.("chatwoot: gateway draining; deferring lane dispatch", {
+            conversationKey: convKey,
+            attempt,
+            maxAttempts: this.dispatchRetries
+          });
+          await delay(this.retryBackoffMs(attempt));
+          continue;
+        }
+        this.log.error?.("chatwoot: lane dispatch failed", {
+          conversationKey: convKey,
+          attempt,
+          draining,
+          error: (error as Error).message
+        });
+        return;
+      }
     }
   }
 }

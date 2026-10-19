@@ -119,4 +119,71 @@ describe("ConversationLanes", () => {
 
     expect(calls).toEqual(["one", "two"]);
   });
+
+  it("retries with backoff when the gateway is draining, then succeeds", async () => {
+    const attempts: number[] = [];
+    const warnings: string[] = [];
+    let failures = 2;
+    const lanes = new ConversationLanes({
+      settleMs: 0,
+      dispatchRetries: 5,
+      retryBackoffMs: () => 1,
+      log: { warn: (msg) => warnings.push(msg) },
+      dispatch: async () => {
+        attempts.push(1);
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("GatewayDrainingError: Gateway is draining; new tasks are not accepted");
+        }
+      }
+    });
+
+    await lanes.run("chatwoot:1:1", makeRequest("1", "hi"));
+
+    expect(attempts).toHaveLength(3);
+    expect(warnings).toEqual([
+      "chatwoot: gateway draining; deferring lane dispatch",
+      "chatwoot: gateway draining; deferring lane dispatch"
+    ]);
+    expect(lanes.pending("chatwoot:1:1")).toBe(0);
+  });
+
+  it("gives up after exhausting draining retries without hanging callers", async () => {
+    const errors: unknown[] = [];
+    let attempts = 0;
+    const lanes = new ConversationLanes({
+      settleMs: 0,
+      dispatchRetries: 3,
+      retryBackoffMs: () => 1,
+      log: { error: (msg, ctx) => errors.push({ msg, ctx }) },
+      dispatch: async () => {
+        attempts += 1;
+        throw new Error("GatewayDrainingError: Gateway is draining; new tasks are not accepted");
+      }
+    });
+
+    await lanes.run("chatwoot:1:1", makeRequest("1", "hi"));
+
+    expect(attempts).toBe(3);
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { msg: string }).msg).toBe("chatwoot: lane dispatch failed");
+    expect(lanes.pending("chatwoot:1:1")).toBe(0);
+  });
+
+  it("does not retry non-draining dispatch failures", async () => {
+    let attempts = 0;
+    const lanes = new ConversationLanes({
+      settleMs: 0,
+      dispatchRetries: 5,
+      retryBackoffMs: () => 1,
+      dispatch: async () => {
+        attempts += 1;
+        throw new Error("boom");
+      }
+    });
+
+    await lanes.run("chatwoot:1:1", makeRequest("1", "hi"));
+
+    expect(attempts).toBe(1);
+  });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@santzit/openclaw-channel-chatwoot",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Native OpenClaw channel plugin for Chatwoot (thin adapter; Chatwoot owns conversations, OpenClaw owns agent execution).",
   "type": "module",
   "license": "MIT",
