@@ -232,7 +232,11 @@ function isResumeSignal(
   status: string | undefined,
   config: ChatwootChannelConfig
 ): boolean {
-  if (status === "resolved") return true;
-  if (teamId === null && config.receptionTeamId !== undefined) return true;
-  return false;
+  // Chatwoot frequently omits team_id (or serializes an omitted field as null)
+  // on unrelated conversation updates. Null is not an explicit resume signal.
+  // Resume only when a concrete team is assigned away from the configured
+  // reception team.
+  return teamId !== undefined && teamId !== null &&
+    config.receptionTeamId !== undefined &&
+    String(teamId) !== String(config.receptionTeamId);
 }
