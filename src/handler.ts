@@ -232,6 +232,12 @@ function isResumeSignal(
   status: string | undefined,
   config: ChatwootChannelConfig
 ): boolean {
+  // An explicit `resolved` status is always a resume signal: the human closed
+  // the conversation, so automation may take over the next one.
+  if (status === "resolved") {
+    return true;
+  }
+
   // Chatwoot frequently omits team_id (or serializes an omitted field as null)
   // on unrelated conversation updates. Null is not an explicit resume signal.
   // Resume only when a concrete team is assigned away from the configured
