@@ -2,7 +2,7 @@
   "id": "chatwoot",
   "name": "Chatwoot",
   "description": "Native OpenClaw channel plugin for Chatwoot. Chatwoot stays the source of truth for conversations and human support; OpenClaw handles AI execution.",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "channels": ["chatwoot"],
   "categories": ["channels"],
   "channelConfigs": {
@@ -26,6 +26,15 @@
           "webhookSecret": {
             "type": "string",
             "description": "Webhook secret. Native mode verifies X-Chatwoot-Signature (HMAC-SHA256 of \"{timestamp}.{raw_body}\"); custom mode verifies HMAC-SHA256 of the raw body in webhookHeader."
+          },
+          "agentBotWebhookSecret": {
+            "type": "string",
+            "description": "Chatwoot AgentBot secret. In native mode, inbound signatures are validated against webhookSecret AND this secret; either match is accepted (one route serves account webhooks and AgentBot deliveries)."
+          },
+          "botInboxIds": {
+            "type": "array",
+            "items": { "type": ["integer", "string"] },
+            "description": "Inbox ids driven by a Chatwoot AgentBot. On these inboxes the conversation status is the ownership signal: pending = bot answers; open/snoozed = human-owned (automatic replies suppressed)."
           },
           "webhookSignatureMode": {
             "type": "string",
@@ -97,6 +106,7 @@
       "uiHints": {
         "apiToken": { "label": "Chatwoot API token", "sensitive": true },
         "webhookSecret": { "label": "Webhook secret", "sensitive": true },
+        "agentBotWebhookSecret": { "label": "AgentBot webhook secret", "sensitive": true },
         "baseUrl": { "label": "Chatwoot base URL", "placeholder": "https://app.chatwoot.com" },
         "accountId": { "label": "Account id" },
         "receptionTeamId": { "label": "Reception team id" },

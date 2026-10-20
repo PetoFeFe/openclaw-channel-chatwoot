@@ -66,9 +66,11 @@ export function makeMessageEvent(options: {
   conversationId: number;
   messageId?: number;
   content?: string;
-  messageType?: string;
+  messageType?: string | number;
   priv?: boolean;
   senderType?: string;
+  inboxId?: number;
+  status?: string;
 }): Record<string, unknown> {
   return {
     event: "message_created",
@@ -78,7 +80,8 @@ export function makeMessageEvent(options: {
     private: options.priv ?? false,
     content_type: "text",
     account: { id: options.accountId ?? 1 },
-    conversation: { id: options.conversationId, status: "open" },
+    conversation: { id: options.conversationId, status: options.status ?? "open" },
+    ...(options.inboxId !== undefined ? { inbox: { id: options.inboxId, name: "bot" } } : {}),
     sender: { id: 42, type: options.senderType ?? "contact" }
   };
 }

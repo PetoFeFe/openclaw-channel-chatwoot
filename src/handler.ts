@@ -64,6 +64,7 @@ function verifyInbound(rawBody: string, deps: WebhookHandlerDeps): boolean {
   return verifyChatwootSignature({
     rawBody,
     secret: config.webhookSecret,
+    additionalSecrets: [config.agentBotWebhookSecret],
     timestampHeader: deps.timestampHeader,
     signatureHeader: deps.signatureHeader,
     toleranceSec: config.webhookTimestampToleranceSec,

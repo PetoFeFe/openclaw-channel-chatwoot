@@ -6,7 +6,8 @@ import {
   signChatwootPayload,
   signWebhookBody,
   verifyChatwootSignature,
-  verifyWebhookSignature
+  verifyWebhookSignature,
+  isIncomingMessageType
 } from "../src/webhook.js";
 import type { ChatwootChannelConfig } from "../src/types.js";
 import { makeMessageEvent } from "./helpers.js";
@@ -190,5 +191,129 @@ describe("webhook parsing and filtering", () => {
     (event.conversation as { id: number | string }).id = "5";
     const decision = classifyInbound(parseWebhook(JSON.stringify(event)));
     expect(decision).toMatchObject({ action: "dispatch", conversationId: "5", messageId: 9 });
+  });
+});
+
+describe("AgentBot webhook support", () => {
+  const botConfig = (overrides: Partial<ChatwootChannelConfig> = {}): ChatwootChannelConfig => ({
+    baseUrl: "http://chatwoot:3000",
+    accountId: 3,
+    apiToken: "t",
+    botInboxIds: [4],
+    ...overrides
+  });
+
+  it("accepts signatures from either the webhook secret or the AgentBot secret", () => {
+    const body = JSON.stringify(makeMessageEvent({ conversationId: 1 }));
+    const timestamp = "1700000000";
+    const nowMs = (Number(timestamp) + 60) * 1000;
+    const accountSig = signChatwootPayload(body, timestamp, "account-secret");
+    const botSig = signChatwootPayload(body, timestamp, "bot-secret");
+    const otherSig = signChatwootPayload(body, timestamp, "wrong-secret");
+    const base = {
+      rawBody: body,
+      timestampHeader: timestamp,
+      toleranceSec: 300,
+      nowMs,
+      secret: "account-secret",
+      additionalSecrets: ["bot-secret"]
+    };
+    expect(verifyChatwootSignature({ ...base, signatureHeader: accountSig })).toBe(true);
+    expect(verifyChatwootSignature({ ...base, signatureHeader: botSig })).toBe(true);
+    expect(verifyChatwootSignature({ ...base, signatureHeader: otherSig })).toBe(false);
+  });
+
+  it("dispatches pending bot-owned messages on a bot inbox", () => {
+    const decision = classifyInbound(
+      parseWebhook(
+        JSON.stringify(
+          makeMessageEvent({ accountId: 3, conversationId: 120, inboxId: 4, status: "pending" })
+        )
+      ),
+      botConfig()
+    );
+    expect(decision).toMatchObject({
+      action: "dispatch",
+      conversationId: "120",
+      conversationStatus: "pending",
+      inboxId: "4"
+    });
+  });
+
+  it("suppresses incoming messages while the conversation is human-owned (open/snoozed)", () => {
+    for (const status of ["open", "snoozed"]) {
+      const decision = classifyInbound(
+        parseWebhook(
+          JSON.stringify(
+            makeMessageEvent({ accountId: 3, conversationId: 120, inboxId: 4, status })
+          )
+        ),
+        botConfig()
+      );
+      expect(decision).toMatchObject({ action: "ignore", reason: "human-owned-status" });
+    }
+  });
+
+  it("does not apply status suppression on non-bot inboxes", () => {
+    const decision = classifyInbound(
+      parseWebhook(
+        JSON.stringify(
+          makeMessageEvent({ accountId: 3, conversationId: 5, inboxId: 3, status: "open" })
+        )
+      ),
+      botConfig()
+    );
+    expect(decision).toMatchObject({ action: "dispatch", conversationStatus: "open" });
+  });
+
+  it("accepts integer message_type from nested/push payloads", () => {
+    const decision = classifyInbound(
+      parseWebhook(
+        JSON.stringify(
+          makeMessageEvent({
+            accountId: 3,
+            conversationId: 120,
+            inboxId: 4,
+            status: "pending",
+            messageType: 0
+          })
+        )
+      ),
+      botConfig()
+    );
+    expect(decision).toMatchObject({ action: "dispatch", conversationId: "120" });
+
+    const outgoing = classifyInbound(
+      parseWebhook(JSON.stringify(makeMessageEvent({ accountId: 3, conversationId: 120, messageType: 1 }))),
+      botConfig()
+    );
+    expect(outgoing).toMatchObject({ action: "ignore", reason: "not-incoming" });
+  });
+
+  it("falls back to nested conversation.messages content", () => {
+    const event = makeMessageEvent({ accountId: 3, conversationId: 120, inboxId: 4, status: "pending" });
+    event.content = "";
+    (event.conversation as Record<string, unknown>).messages = [{ id: 77, content: "bom dia" }];
+    const decision = classifyInbound(parseWebhook(JSON.stringify(event)), botConfig());
+    expect(decision).toMatchObject({ action: "dispatch", text: "bom dia", conversationId: "120" });
+  });
+
+  it("prefers conversation_id (display id) over the nested raw id", () => {
+    const event = makeMessageEvent({ accountId: 3, conversationId: 120, inboxId: 4, status: "pending" });
+    event.conversation_id = 120;
+    (event.conversation as Record<string, unknown>).id = 999; // raw DB id
+    const decision = classifyInbound(parseWebhook(JSON.stringify(event)), botConfig());
+    expect(decision).toMatchObject({ action: "dispatch", conversationId: "120" });
+  });
+});
+
+describe("isIncomingMessageType", () => {
+  it("accepts the string enum and integer 0 only", () => {
+    expect(isIncomingMessageType("incoming")).toBe(true);
+    expect(isIncomingMessageType(0)).toBe(true);
+    expect(isIncomingMessageType(1)).toBe(false);
+    expect(isIncomingMessageType(2)).toBe(false);
+    expect(isIncomingMessageType("outgoing")).toBe(false);
+    expect(isIncomingMessageType(undefined)).toBe(false);
   });
 });

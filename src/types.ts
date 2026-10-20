@@ -15,6 +15,20 @@ export interface ChatwootChannelConfig {
   /** Shared secret used to authenticate inbound webhooks. */
   webhookSecret?: string;
   /**
+   * Secret that signs Chatwoot AgentBot deliveries to this same endpoint.
+   * In "chatwoot" signature mode, inbound signatures are validated against
+   * `webhookSecret` and this secret; a match against either is accepted, so
+   * account webhooks and AgentBot deliveries share one route safely.
+   */
+  agentBotWebhookSecret?: string;
+  /**
+   * Inbox ids driven by a Chatwoot AgentBot. On those inboxes the conversation
+   * status is the ownership signal: `pending` belongs to the bot (dispatch),
+   * `open`/`snoozed` belong to humans (suppress automatic replies). Other
+   * inboxes keep the plugin-side handoff state machine.
+   */
+  botInboxIds?: Array<string | number>;
+  /**
    * Signature scheme for inbound webhooks.
    *  - "chatwoot" (default): native `X-Chatwoot-Signature` / `X-Chatwoot-Timestamp`.
    *  - "custom": legacy `HMAC-SHA256(rawBody)` in `webhookHeader`.
@@ -85,6 +99,10 @@ export function normalizeChannelConfig(raw: Record<string, unknown> = {}): Chatw
     accountId: accountIdRaw as string | number,
     apiToken: String(raw.apiToken),
     webhookSecret: raw.webhookSecret ? String(raw.webhookSecret) : undefined,
+    agentBotWebhookSecret: raw.agentBotWebhookSecret ? String(raw.agentBotWebhookSecret) : undefined,
+    botInboxIds: Array.isArray(raw.botInboxIds)
+      ? (raw.botInboxIds as unknown[]).map(String)
+      : undefined,
     webhookSignatureMode: signatureMode,
     webhookHeader: raw.webhookHeader ? String(raw.webhookHeader) : DEFAULT_WEBHOOK_HEADER,
     webhookTimestampToleranceSec:

@@ -9,6 +9,9 @@ import type { ChatwootChannelConfig } from "./types.js";
  *      X-Chatwoot-Timestamp: <unix seconds>
  *      X-Chatwoot-Signature: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{raw_body}")>
  *      X-Chatwoot-Delivery:  <delivery id, optional>
+ *    Both account webhooks and AgentBot deliveries use this scheme, each with
+ *    its own secret. When `botWebhookSecret` is configured, a signature that
+ *    validates against either secret is accepted (same endpoint serves both).
  *  - "custom": a shared-secret HMAC-SHA256 over the raw body, carried in a
  *    configurable header (for deployments behind a signing proxy).
  *
@@ -19,7 +22,8 @@ export interface ChatwootWebhookMessage extends Record<string, unknown> {
   event: "message_created" | "message_updated";
   id: number | string;
   content?: string;
-  message_type?: "incoming" | "outgoing" | "template";
+  /** String enum (account webhooks) or raw integer (message push data: 0/1/2). */
+  message_type?: "incoming" | "outgoing" | "template" | number;
   private?: boolean;
   content_type?: string;
   conversation_id?: number | string;
@@ -28,8 +32,10 @@ export interface ChatwootWebhookMessage extends Record<string, unknown> {
     status?: string;
     team_id?: number | string | null;
     inbox_id?: number | string;
+    messages?: Array<{ id?: number | string; content?: string; [key: string]: unknown }>;
     [key: string]: unknown;
   };
+  inbox?: { id?: number | string; name?: string; [key: string]: unknown };
   account?: { id?: number | string; [key: string]: unknown };
   sender?: { id?: number | string; type?: string; [key: string]: unknown };
 }
@@ -63,6 +69,10 @@ export interface InboundDecision {
   text?: string;
   senderId?: string;
   senderType?: string;
+  /** Conversation status carried by the webhook payload, when present. */
+  conversationStatus?: string;
+  /** Inbox id from the payload, when present (AgentBot payloads include it). */
+  inboxId?: string;
 }
 
 /** Constant-time comparison of two strings. */
@@ -118,6 +128,12 @@ export function signChatwootPayload(
 export function verifyChatwootSignature(params: {
   rawBody: string;
   secret?: string;
+  /**
+   * Additional accepted secrets. Chatwoot AgentBot deliveries are signed with
+   * the bot's own secret, while account webhooks use the webhook secret; a
+   * single endpoint accepts either when both are configured.
+   */
+  additionalSecrets?: Array<string | undefined>;
   signatureHeader?: string;
   timestampHeader?: string;
   toleranceSec?: number;
@@ -125,7 +141,11 @@ export function verifyChatwootSignature(params: {
   nowMs?: number;
 }): boolean {
   const { rawBody, secret, signatureHeader, timestampHeader } = params;
-  if (!secret) return true;
+  const candidates = [secret, ...(params.additionalSecrets ?? [])].filter(
+    (s): s is string => typeof s === "string" && s.length > 0
+  );
+  // No secret configured => webhook auth is disabled (not recommended).
+  if (candidates.length === 0) return true;
   if (!signatureHeader || !timestampHeader) return false;
 
   const tolerance = params.toleranceSec ?? 300;
@@ -136,8 +156,10 @@ export function verifyChatwootSignature(params: {
     if (Math.abs(nowSec - timestamp) > tolerance) return false;
   }
 
-  const expected = signChatwootPayload(rawBody, timestampHeader, secret);
-  return safeEqual(signatureHeader.trim().toLowerCase(), expected);
+  const provided = signatureHeader.trim().toLowerCase();
+  return candidates.some((candidate) =>
+    safeEqual(provided, signChatwootPayload(rawBody, timestampHeader, candidate))
+  );
 }
 
 export function parseWebhook(rawBody: string): ChatwootWebhookEvent {
@@ -183,6 +205,51 @@ function idString(value: unknown): string | undefined {
 }
 
 /**
+ * Chatwoot `message_type` arrives as the string enum ("incoming"/"outgoing")
+ * on message webhooks, but nested/push payloads may carry the raw integer
+ * (0 = incoming, 1 = outgoing, 2 = activity). Accept both.
+ */
+export function isIncomingMessageType(value: unknown): boolean {
+  if (value === "incoming") return true;
+  if (typeof value === "number") return value === 0;
+  return false;
+}
+
+/**
+ * Message text: flat top-level `content` (message webhook) or, for payloads
+ * that nest the triggering message under `conversation.messages`, the nested
+ * content. Chatwoot sends both; this is a fallback, not a second source.
+ */
+function messageTextOf(msg: ChatwootWebhookMessage): string {
+  if (typeof msg.content === "string" && msg.content.trim().length > 0) {
+    return msg.content.trim();
+  }
+  const nested = msg.conversation?.messages;
+  if (Array.isArray(nested) && nested.length > 0) {
+    const first = nested[0];
+    if (typeof first?.content === "string") return first.content.trim();
+  }
+  return "";
+}
+
+/**
+ * Conversation status values that mean a HUMAN owns the conversation: on an
+ * AgentBot inbox, `pending` belongs to the bot and `open`/`snoozed` belong to
+ * human agents. `resolved` belongs to neither (the next customer message
+ * re-pends it so the bot resumes).
+ */
+export const HUMAN_OWNED_STATUSES = new Set(["open", "snoozed"]);
+
+/** True when the event's inbox is one of the configured AgentBot inboxes. */
+export function isBotInbox(
+  inboxId: string | undefined,
+  config?: ChatwootChannelConfig
+): boolean {
+  if (inboxId === undefined || !config?.botInboxIds?.length) return false;
+  return config.botInboxIds.some((id) => String(id) === inboxId);
+}
+
+/**
  * Decide whether an event should be dispatched to the agent.
  *
  * Outgoing agent/bot messages and private notes are filtered out to prevent
@@ -202,7 +269,7 @@ export function classifyInbound(
     return { action: "ignore", reason: "account-mismatch" };
   }
   const msg = event as ChatwootWebhookMessage;
-  if (msg.message_type !== "incoming") {
+  if (!isIncomingMessageType(msg.message_type)) {
     return { action: "ignore", reason: "not-incoming" };
   }
   if (msg.private === true) {
@@ -212,13 +279,21 @@ export function classifyInbound(
   if (senderType === "agent" || senderType === "bot") {
     return { action: "ignore", reason: "self-authored" };
   }
-  const text = typeof msg.content === "string" ? msg.content.trim() : "";
+  const text = messageTextOf(msg);
   if (!text) {
     return { action: "ignore", reason: "empty-content" };
   }
-  const conversationId = idString(msg.conversation?.id ?? msg.conversation_id);
+  const conversationId = idString(msg.conversation_id) ?? idString(msg.conversation?.id);
   if (conversationId === undefined) {
     return { action: "ignore", reason: "missing-conversation" };
+  }
+  // AgentBot inboxes: Chatwoot's conversation status is the ownership signal.
+  // `pending` => the bot (Tata) owns it; `open`/`snoozed` => a human owns it
+  // and automatic replies are suppressed without any plugin-side state.
+  const status = typeof msg.conversation?.status === "string" ? msg.conversation.status : undefined;
+  const inboxId = idString(msg.inbox?.id ?? msg.conversation?.inbox_id);
+  if (isBotInbox(inboxId, config) && status !== undefined && HUMAN_OWNED_STATUSES.has(status)) {
+    return { action: "ignore", reason: "human-owned-status" };
   }
   // The configured account is authoritative for the session key; fall back to
   // the payload (or empty) only when config does not pin an account.
@@ -234,6 +309,8 @@ export function classifyInbound(
     messageId: numericId(msg.id),
     text,
     senderId: idString(msg.sender?.id),
-    senderType
+    senderType,
+    conversationStatus: status,
+    inboxId
   };
 }
