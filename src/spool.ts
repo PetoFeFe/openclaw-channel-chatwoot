@@ -218,8 +218,12 @@ export class Spool {
    *  - key present in processing/ wins: drop the inbox duplicate;
    *  - processing record with missing/expired lease returns to inbox
    *    (attempt counter preserved).
+   *
+   * With `ignoreLeases` (used at STARTUP) every processing record returns to
+   * inbox: a fresh process owns the whole state directory, so a live lease can
+   * only belong to a dispatch that died with the previous process.
    */
-  async recover(nowIso: string): Promise<void> {
+  async recover(nowIso: string, opts: { ignoreLeases?: boolean } = {}): Promise<void> {
     const inbox = await this.list("inbox");
     for (const record of inbox) {
       const claimed = await this.read("processing", record.key);
@@ -230,9 +234,10 @@ export class Spool {
     }
     const processing = await this.list("processing");
     for (const record of processing) {
-      // Only requeue abandoned leases (missing or expired). A live lease
-      // means another dispatch is in flight (or this same one is running).
-      if (record.leaseUntil && record.leaseUntil > nowIso) continue;
+      // During runtime only requeue abandoned leases (missing/expired): a
+      // live lease means a dispatch is in flight. At startup ignoreLeases is
+      // set and every stale claim is reclaimed.
+      if (!opts.ignoreLeases && record.leaseUntil && record.leaseUntil > nowIso) continue;
       await this.requeue(record, {});
     }
   }

@@ -383,3 +383,55 @@ describe("spool queue exactly-once protections", () => {
     queue.stop();
   });
 });
+
+describe("spool queue startup reclaim", () => {
+  it("reclaims processing records with LIVE leases at startup (single-owner state dir)", async () => {
+    const spool = await freshSpool();
+    // Simulate a dispatch that died with the previous process: the lease is
+    // still valid, but a fresh start must reclaim it immediately.
+    const rec = record();
+    await spool.accept(rec);
+    const [due] = await spool.list("inbox");
+    await spool.claim(due, new Date(Date.now() + 600_000).toISOString()); // lease: future
+    expect((await spool.list("processing")).length).toBe(1);
+
+    const calls: DispatchRequest[] = [];
+    const queue = new SpoolQueue({
+      spool,
+      config,
+      dispatch: async (request) => calls.push(request),
+      toRequest: requestFromRecord,
+      tickMs: 10,
+      settleMs: 0
+    });
+    await queue.start(); // must reclaim despite the live lease
+    await waitFor(() => calls.length === 1, 2000);
+    queue.stop();
+    const [redispatched] = calls;
+    expect(redispatched?.messageId).toBe(100);
+    // redelivered batch must be flagged (claims>=2) so already-answered protection applies
+  });
+
+  it("runtime tick does NOT reclaim records with live leases (in-flight dispatch)", async () => {
+    const spool = await freshSpool();
+    const rec = record();
+    await spool.accept(rec);
+    const [due] = await spool.list("inbox");
+    const lease = new Date(Date.now() + 600_000).toISOString();
+    await spool.claim(due, lease);
+    const calls: DispatchRequest[] = [];
+    const queue = new SpoolQueue({
+      spool,
+      config,
+      dispatch: async (request) => calls.push(request),
+      toRequest: requestFromRecord,
+      tickMs: 10,
+      settleMs: 0
+    });
+    // do NOT call start(); drive tickOnce directly (no startup reclaim)
+    await queue.tickOnce();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(calls.length).toBe(0);
+    expect((await spool.list("processing")).length).toBe(1);
+  });
+});

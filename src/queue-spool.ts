@@ -104,7 +104,11 @@ export class SpoolQueue {
     if (this.running) return;
     this.running = true;
     await this.opts.spool.init();
-    await this.opts.spool.recover(this.nowIso());
+    // Startup: reclaim every processing record. This process owns the state
+    // directory, so any existing claim belongs to a dispatch that died with
+    // the previous process (leases only guard against concurrent claims at
+    // runtime).
+    await this.opts.spool.recover(this.nowIso(), { ignoreLeases: true });
     this.loopPromise = this.loop();
     if ((this.opts.reconcileIntervalMs ?? 60_000) > 0 && this.opts.client) {
       this.scheduleReconcile((this.opts.reconcileIntervalMs ?? 60_000) / 2);
