@@ -8,6 +8,7 @@ import {
   parseWebhook,
   verifyChatwootSignature,
   verifyWebhookSignature,
+  type ChatwootWebhookAttachment,
   type ChatwootWebhookConversation,
   type ChatwootWebhookMessage
 } from "./webhook.js";
@@ -21,6 +22,8 @@ export interface DispatchRequest {
   /** Conversation status at receipt (agent owns the handoff decision). */
   status?: string;
   senderId?: string;
+  /** Voice-note/audio attachments to stage for transcription (may be empty). */
+  audioAttachments?: ChatwootWebhookAttachment[];
   raw: ChatwootWebhookMessage;
 }
 
@@ -149,6 +152,7 @@ export async function prepareInboundAck(
     messageId: decision.messageId,
     senderId: decision.senderId,
     status: decision.conversationStatus,
+    audioAttachments: decision.audioAttachments,
     raw
   };
 

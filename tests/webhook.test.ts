@@ -324,3 +324,74 @@ describe("isIncomingMessageType", () => {
     expect(isIncomingMessageType(undefined)).toBe(false);
   });
 });
+
+describe("audio attachments (voice notes)", () => {
+  const audioMsg = (overrides: Record<string, unknown> = {}) => ({
+    event: "message_created",
+    id: 900,
+    content: "",
+    message_type: "incoming",
+    private: false,
+    content_type: "text",
+    account: { id: 3 },
+    conversation: { id: 112, status: "pending", inbox_id: 4 },
+    inbox: { id: 4, name: "TauiTest_bot" },
+    sender: { id: 11, type: "contact" },
+    attachments: [
+      { id: 55, file_type: "audio", data_url: "https://cw.test/a.ogg", content_type: "audio/ogg" }
+    ],
+    ...overrides
+  });
+
+  it("dispatches audio-only messages (no text) with audioAttachments", () => {
+    const decision = classifyInbound(parseWebhook(JSON.stringify(audioMsg())));
+    expect(decision).toMatchObject({ action: "dispatch", reason: "incoming" });
+    expect(decision.audioAttachments?.[0]?.data_url).toBe("https://cw.test/a.ogg");
+  });
+
+  it("keeps text and audio together", () => {
+    const decision = classifyInbound(
+      parseWebhook(JSON.stringify(audioMsg({ content: "olá" })))
+    );
+    expect(decision.action).toBe("dispatch");
+    expect(decision.text).toBe("olá");
+    expect(decision.audioAttachments?.length).toBe(1);
+  });
+
+  it("ignores text-less messages without audio attachments", () => {
+    const decision = classifyInbound(
+      parseWebhook(JSON.stringify(audioMsg({ attachments: [] })))
+    );
+    expect(decision).toMatchObject({ action: "ignore", reason: "empty-content" });
+  });
+
+  it("ignores non-audio attachments when there is no text", () => {
+    const decision = classifyInbound(
+      parseWebhook(
+        JSON.stringify(
+          audioMsg({
+            attachments: [{ id: 56, file_type: "file", data_url: "https://cw.test/x.pdf" }]
+          })
+        )
+      )
+    );
+    expect(decision).toMatchObject({ action: "ignore", reason: "empty-content" });
+  });
+
+  it("reads audio from the nested AgentBot payload shape", () => {
+    const nested = audioMsg({ attachments: undefined });
+    (nested.conversation as Record<string, unknown>).messages = [
+      {
+        id: 900,
+        content: "",
+        message_type: 0,
+        attachments: [
+          { id: 57, file_type: "audio", data_url: "https://cw.test/b.ogg", content_type: "audio/ogg" }
+        ]
+      }
+    ];
+    const decision = classifyInbound(parseWebhook(JSON.stringify(nested)));
+    expect(decision.action).toBe("dispatch");
+    expect(decision.audioAttachments?.[0]?.data_url).toBe("https://cw.test/b.ogg");
+  });
+});

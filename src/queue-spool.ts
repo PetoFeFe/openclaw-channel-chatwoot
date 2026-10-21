@@ -242,6 +242,13 @@ export class SpoolQueue {
       if (claimed.length > 1) {
         batch.text = claimed.map((record) => record.text).join("\n");
       }
+      // Voice-note attachments ride along with the batch; the agent runtime
+      // (not the plugin) owns transcription and reply decisions.
+      const batchAudio = claimed.flatMap((record) => record.audioAttachments ?? []);
+      if (batchAudio.length > 0) {
+        batch.audioAttachments =
+          batchAudio as unknown as NonNullable<typeof batch.audioAttachments>;
+      }
       // Pass the live conversation status to the agent: the agent decides
       // whether a human owns the conversation and must stay silent.
       const live = await this.currentStatus(claimed[0] as SpoolRecord);

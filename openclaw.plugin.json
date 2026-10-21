@@ -2,7 +2,7 @@
   "id": "chatwoot",
   "name": "Chatwoot",
   "description": "Native OpenClaw channel plugin for Chatwoot. Chatwoot stays the source of truth for conversations and human support; OpenClaw handles AI execution.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "channels": [
     "chatwoot"
   ],
@@ -192,5 +192,10 @@
         "description": "How often the reconciler scans recent pending bot-inbox conversations for customer messages the spool never accepted. 0 disables."
       }
     }
+  },
+  "contracts": {
+    "mediaUnderstandingProviders": [
+      "llm-gateway"
+    ]
   }
 }

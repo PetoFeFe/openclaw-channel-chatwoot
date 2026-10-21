@@ -42,6 +42,8 @@ export interface SpoolRecord {
    * shortcut skip the batch.
    */
   claims?: number;
+  /** Audio/voice attachments worth transcribing (Chatwoot data_url form). */
+  audioAttachments?: Array<Record<string, unknown>>;
   /** ISO deadline after which a processing record is considered abandoned. */
   leaseUntil?: string;
   lastError?: string;

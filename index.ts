@@ -6,8 +6,10 @@
  *   2. Deduplicates incoming messages via durable state.
  *   3. Filters account scope and incoming/private message flags.
  *   4. Acknowledges HTTP 200 immediately to Chatwoot so webhooks never time out.
- *   5. Runs the agent turn inside the handler, serialized and coalesced per
- *      conversation by a lane so a message burst never starts two turns.
+ *   5. Dispatches the agent turn through the durable spool queue (or the
+ *      legacy inline lane). Attachments are only STAGED into the OpenClaw
+ *      media store; the channel never transcribes/interprets media — that is
+ *      the TATA agent runtime's job (tools.media audio understanding).
  *
  * The agent itself (Tata) owns reading Help Center articles and posting
  * replies back to Chatwoot using the Chatwoot CLI/tools. The plugin never
@@ -15,6 +17,11 @@
  */
 import { join } from "node:path";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
+import {
+  transcribeOpenAiCompatibleAudio,
+  type AudioTranscriptionRequest,
+  type AudioTranscriptionResult
+} from "openclaw/plugin-sdk/media-understanding";
 import {
   chatwootPlugin,
   bindAccountResolver,
@@ -41,6 +48,154 @@ type Api = Parameters<NonNullable<Parameters<typeof defineChannelPluginEntry>[0]
 
 const CHANNEL = "chatwoot";
 
+/** Chatwoot attachment with a staged local path (media store) or a remote URL. */
+interface StagedAttachment {
+  attachment: Record<string, unknown>;
+  localPath?: string;
+  remoteUrl?: string;
+  mime: string;
+}
+
+/**
+ * Register `llm-gateway` (the deployment's OpenAI-compatible LLM provider) as
+ * an audio-transcription media provider using the shared OpenAI-compatible
+ * implementation. Model/base URL come from tools.media config + env.
+ */
+function registerGatewayMediaProvider(api: Api): void {
+  const defaultModel = "grok-stt-1-0";
+  api.registerMediaUnderstandingProvider({
+    id: "llm-gateway",
+    capabilities: ["audio"],
+    defaultModels: { audio: defaultModel },
+    autoPriority: { audio: 30 },
+    resolveAuth: () => {
+      const apiKey = process.env.LLM_GATEWAY_API_KEY ?? "";
+      return apiKey
+        ? { kind: "api-key", apiKey, source: "env:LLM_GATEWAY_API_KEY" }
+        : { kind: "none", source: "env:LLM_GATEWAY_API_KEY (missing)" };
+    },
+    transcribeAudio: (req: AudioTranscriptionRequest): Promise<AudioTranscriptionResult> =>
+      transcribeOpenAiCompatibleAudio({
+        ...req,
+        provider: "llm-gateway",
+        defaultBaseUrl: process.env.LLM_GATEWAY_BASE_URL ?? "https://api.llmgateway.io/v1",
+        defaultModel
+      })
+  } as never);
+}
+
+/**
+ * Chatwoot renders attachment URLs from its public FRONTEND_URL, which may be
+ * unreachable or have an untrusted cert from inside the gateway container.
+ * Swap the public host for the configured internal base URL when they point
+ * at the same Chatwoot; signed blob paths stay intact.
+ */
+function makeChatwootUrlRewriter(baseUrl: string): (url: string) => string {
+  let internal: URL | undefined;
+  try {
+    internal = new URL(baseUrl);
+  } catch {
+    internal = undefined;
+  }
+  return (url: string) => {
+    if (!internal) return url;
+    try {
+      const parsed = new URL(url);
+      // Only Chatwoot-hosted media (ActiveStorage paths, or a chatwoot-named
+      // host) gets pointed at the configured internal base URL; the signed
+      // blob path is preserved. Already-internal URLs pass through untouched.
+      const looksLikeChatwootMedia =
+        parsed.pathname.startsWith("/rails/") || /chatwoot/i.test(parsed.hostname);
+      if (!looksLikeChatwootMedia) return url;
+      if (parsed.host === internal.host) return url;
+      const rewritten = new URL(parsed.pathname + parsed.search, internal);
+      return rewritten.toString();
+    } catch {
+      /* not a URL; pass through */
+    }
+    return url;
+  };
+}
+
+/** Best-effort file extension so the media store keeps a recognizable name. */
+function extFromMime(mime: string): string {
+  const subtype = (mime.split("/")[1] ?? "").split(";")[0].trim().toLowerCase();
+  switch (subtype) {
+    case "mpeg":
+    case "mp3":
+      return "mp3";
+    case "wav":
+    case "x-wav":
+      return "wav";
+    case "ogg":
+    case "oga":
+    case "opus":
+      return "oga";
+    case "mp4":
+    case "m4a":
+    case "x-m4a":
+      return "m4a";
+    case "webm":
+      return "webm";
+    case "aac":
+      return "m4a";
+    case "amr":
+      return "amr";
+    default:
+      return "bin";
+  }
+}
+
+/** Bearer auth for downloading Chatwoot-hosted media (private ActiveStorage). */
+function chatwootMediaHeaders(): Record<string, string> {
+  const token = process.env.CHATWOOT_API_TOKEN ?? process.env.OPENCLAW_GATEWAY_TOKEN;
+  return token ? { "api-access-token": token } : {};
+}
+
+/**
+ * Download + persist each attachment into the OpenClaw media store via the
+ * plugin SDK. A failed staging falls back to the raw remote URL (still works
+ * for publicly reachable media) so a voice note is never dropped.
+ */
+async function stageAttachments(
+  attachments: Array<Record<string, unknown>>,
+  log: { warn?: (msg: string, ctx?: Record<string, unknown>) => void },
+  conversationId: string,
+  mediaUrlRewrite?: (url: string) => string
+): Promise<StagedAttachment[]> {
+  const { saveRemoteMedia } = await import("openclaw/plugin-sdk/media-runtime");
+  const out: StagedAttachment[] = [];
+  for (const att of attachments) {
+    const mime = String(att.content_type ?? att.mime_type ?? "audio/ogg");
+    const rawUrl = mediaUrlRewrite ? mediaUrlRewrite(String(att.data_url ?? "")) : String(att.data_url ?? "");
+    if (!rawUrl) continue;
+    try {
+      const saved = await saveRemoteMedia({
+        url: rawUrl,
+        headers: chatwootMediaHeaders(),
+        subdir: "chatwoot",
+        maxBytes: 25 * 1024 * 1024,
+        fallbackContentType: mime,
+        originalFilename: `chatwoot-${String(att.id ?? Date.now())}.${extFromMime(mime)}`,
+        allowPrivateNetwork: true
+      } as never) as { id?: string; path?: string };
+      out.push({
+        attachment: att,
+        localPath: saved.path,
+        remoteUrl: rawUrl,
+        mime
+      });
+    } catch (error) {
+      log.warn?.("chatwoot: audio staging failed; passing raw URL through", {
+        conversationId,
+        error: String(error)
+      });
+      out.push({ attachment: att, remoteUrl: rawUrl, mime });
+    }
+  }
+  return out;
+}
+
 export default defineChannelPluginEntry({
   id: "chatwoot",
   name: "Chatwoot",
@@ -65,6 +220,12 @@ export default defineChannelPluginEntry({
     // Allow account resolution
     bindAccountResolver((accountId) => resolveAccount(api.config, accountId));
 
+    // Media understanding: register the LLM Gateway as an audio (STT)
+    // capability provider so OpenClaw's own media pipeline can transcribe
+    // voice notes DURING THE TATA AGENT TURN. The channel plugin stages the
+    // bytes (media transport) and never interprets them.
+    registerGatewayMediaProvider(api);
+
     const dispatch: Dispatch = async (request) => {
       // Resolve the routed agent for this conversation
       const agentRoute = api.runtime.channel.routing.resolveAgentRoute({
@@ -87,14 +248,44 @@ export default defineChannelPluginEntry({
 
       // Inbound context: provide clear conversation details to the agent
       const statusNote = request.status ?? "unknown";
+      const audio: Array<Record<string, unknown>> = (request.audioAttachments ?? []) as unknown as Array<Record<string, unknown>>;
+
+      // Voice notes/images: Chatwoot stores attachments in private
+      // ActiveStorage behind redirect URLs that need the Chatwoot API token.
+      // The channel does NOT interpret them: it only stages the bytes into
+      // the OpenClaw media store so the TATA agent (media understanding) can
+      // transcribe/understand them. Staging failure still passes the raw URL.
+      const mediaFacts: Array<{ path?: string; url?: string; contentType?: string }> = [];
+      if (audio.length > 0) {
+        const staged = await stageAttachments(
+          audio,
+          api.logger,
+          request.conversationId,
+          makeChatwootUrlRewriter(config.baseUrl)
+        );
+        for (const item of staged) {
+          mediaFacts.push({
+            path: item.localPath,
+            url: item.localPath ? undefined : item.remoteUrl,
+            contentType: item.mime
+          });
+        }
+      }
+
+      const voiceNote = mediaFacts.length > 0 && !request.text;
+      const customerLine = voiceNote ? "(mensagem de voz recebida)" : request.text;
       const promptText = `[Chatwoot Conversation ${request.conversationId} | Account ${request.accountId} | Status: ${statusNote}]
-Customer: ${request.text}`;
+Customer: ${customerLine}`;
 
       const ctxPayload = api.runtime.channel.reply.finalizeInboundContext({
         Body: promptText,
         BodyForAgent: promptText,
         RawBody: request.text,
         CommandBody: request.text,
+        MediaPaths: mediaFacts.map((m) => m.path).filter((u): u is string => Boolean(u)),
+        MediaUrls: mediaFacts.map((m) => m.url).filter((u): u is string => Boolean(u)),
+        MediaTypes: mediaFacts.map((m) => m.contentType ?? "application/octet-stream"),
+        media: mediaFacts,
         From: senderAddress,
         To: `chatwoot:${request.accountId}`,
         SessionKey: coreSessionKey,
@@ -111,7 +302,9 @@ Customer: ${request.text}`;
         chatwoot: {
           accountId: request.accountId,
           conversationId: request.conversationId,
-          sessionKey: request.sessionKey
+          sessionKey: request.sessionKey,
+          status: request.status,
+          audioAttachments: audio.map((a) => String(a.data_url ?? "")).filter(Boolean)
         }
       });
 
@@ -168,6 +361,9 @@ Customer: ${request.text}`;
         text: request.text,
         senderId: request.senderId,
         statusAtReceipt: request.status ?? request.raw.conversation?.status,
+        audioAttachments: request.audioAttachments
+          ? (request.audioAttachments as unknown as Array<Record<string, unknown>>)
+          : undefined,
         receivedAt: received.toISOString(),
         availableAt: new Date(received.getTime() + settleMs).toISOString(),
         attempt: 0,
@@ -184,6 +380,9 @@ Customer: ${request.text}`;
       messageId: record.messageId,
       senderId: record.senderId,
       status: record.statusAtReceipt,
+      audioAttachments: record.audioAttachments
+        ? (record.audioAttachments as unknown as DispatchRequest["audioAttachments"])
+        : undefined,
       raw: record.payload as DispatchRequest["raw"]
     });
 

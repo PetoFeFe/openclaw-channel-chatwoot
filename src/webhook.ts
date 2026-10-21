@@ -32,12 +32,25 @@ export interface ChatwootWebhookMessage extends Record<string, unknown> {
     status?: string;
     team_id?: number | string | null;
     inbox_id?: number | string;
-    messages?: Array<{ id?: number | string; content?: string; [key: string]: unknown }>;
+    messages?: Array<{ id?: number | string; content?: string; attachments?: ChatwootWebhookAttachment[]; [key: string]: unknown }>;
     [key: string]: unknown;
   };
   inbox?: { id?: number | string; name?: string; [key: string]: unknown };
   account?: { id?: number | string; [key: string]: unknown };
   sender?: { id?: number | string; type?: string; [key: string]: unknown };
+  attachments?: ChatwootWebhookAttachment[];
+}
+
+/** Chatwoot message attachment (push_event_data shape). */
+export interface ChatwootWebhookAttachment {
+  id?: number | string;
+  file_type?: string;
+  data_url?: string;
+  mime_type?: string;
+  content_type?: string;
+  extension?: string;
+  file_size?: number;
+  [key: string]: unknown;
 }
 
 export interface ChatwootWebhookConversation extends Record<string, unknown> {
@@ -73,6 +86,8 @@ export interface InboundDecision {
   conversationStatus?: string;
   /** Inbox id from the payload, when present (AgentBot payloads include it). */
   inboxId?: string;
+  /** Audio attachments worth transcribing, when present. */
+  audioAttachments?: ChatwootWebhookAttachment[];
 }
 
 /** Constant-time comparison of two strings. */
@@ -233,6 +248,49 @@ function messageTextOf(msg: ChatwootWebhookMessage): string {
 }
 
 /**
+ * The nested chatwoot `message_created` payload's `messages[0]` is the
+ * triggering message itself. For flat payloads the top level is authoritative;
+ * the nested array is only consulted as a fallback (so attachments are not
+ * double-counted).
+ */
+function nestedMessage(msg: ChatwootWebhookMessage): ChatwootWebhookMessage | undefined {
+  const nested = msg.conversation?.messages;
+  if (Array.isArray(nested) && nested.length > 0) {
+    return nested[0] as ChatwootWebhookMessage;
+  }
+  return undefined;
+}
+
+/** True when a Chatwoot attachment carries transcribable audio. */
+export function isAudioAttachment(att: ChatwootWebhookAttachment | undefined): att is ChatwootWebhookAttachment {
+  if (!att || typeof att.data_url !== "string" || !att.data_url.trim()) return false;
+  const kind = String(att.file_type ?? att.content_type ?? att.mime_type ?? "").toLowerCase();
+  return kind === "audio" || kind === "voice" || kind.startsWith("audio/");
+}
+
+/** Audio attachments from both payload shapes (flat + nested), deduped by id. */
+export function audioAttachmentsOf(msg: ChatwootWebhookMessage): ChatwootWebhookAttachment[] {
+  const lists: Array<ChatwootWebhookAttachment[] | undefined> = [
+    Array.isArray(msg.attachments) ? msg.attachments : undefined,
+    Array.isArray(msg.conversation?.messages?.[0]?.attachments)
+      ? (msg.conversation.messages[0].attachments as ChatwootWebhookAttachment[])
+      : undefined
+  ];
+  const seen = new Set<string>();
+  const out: ChatwootWebhookAttachment[] = [];
+  for (const list of lists) {
+    for (const att of list ?? []) {
+      if (!isAudioAttachment(att)) continue;
+      const id = att.id !== undefined ? String(att.id) : (att.data_url ?? "");
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(att);
+    }
+  }
+  return out;
+}
+
+/**
  * Decide whether an event should be dispatched to the agent.
  *
  * Outgoing agent/bot messages and private notes are filtered out to prevent
@@ -263,7 +321,8 @@ export function classifyInbound(
     return { action: "ignore", reason: "self-authored" };
   }
   const text = messageTextOf(msg);
-  if (!text) {
+  const audio = audioAttachmentsOf(msg);
+  if (!text && audio.length === 0) {
     return { action: "ignore", reason: "empty-content" };
   }
   const conversationId = idString(msg.conversation_id) ?? idString(msg.conversation?.id);
@@ -292,6 +351,7 @@ export function classifyInbound(
     senderId: idString(msg.sender?.id),
     senderType,
     conversationStatus: status,
-    inboxId
+    inboxId,
+    audioAttachments: audio.length > 0 ? audio : undefined
   };
 }
