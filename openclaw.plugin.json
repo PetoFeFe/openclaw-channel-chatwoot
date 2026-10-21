@@ -179,6 +179,17 @@
         "type": "integer",
         "minimum": 1000,
         "default": 15000
+      },
+      "queueEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Durable inbound queue (spool + background worker, OpenResponses submission model). Set false to fall back to legacy inline lane dispatch."
+      },
+      "reconcileIntervalMs": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 60000,
+        "description": "How often the reconciler scans recent pending bot-inbox conversations for customer messages the spool never accepted. 0 disables."
       }
     }
   }

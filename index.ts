@@ -53,6 +53,10 @@ export default defineChannelPluginEntry({
       timeoutMs?: number;
       settleMs?: number;
       dispatchRetries?: number;
+      /** Set false to fall back to the legacy inline lane dispatch. */
+      queueEnabled?: boolean;
+      /** Reconcile interval (ms). Default 60000; 0 disables. */
+      reconcileIntervalMs?: number;
     };
     const stateDir =
       pluginConfig.stateDir ?? process.env.OPENCLAW_CHATWOOT_STATE_DIR ?? api.resolvePath(".state");
@@ -196,6 +200,7 @@ Customer: ${request.text}`;
       client: reconcileSource,
       log: api.logger,
       settleMs: pluginConfig.settleMs,
+      reconcileIntervalMs: pluginConfig.reconcileIntervalMs,
       privateNote: async (record, reason) => {
         await client.sendPrivateNote(
           record.conversationId,
@@ -203,7 +208,8 @@ Customer: ${request.text}`;
         );
       }
     });
-    void queue.start();
+    const queueEnabled = pluginConfig.queueEnabled !== false;
+    if (queueEnabled) void queue.start();
 
     const deps: WebhookHandlerDeps = {
       config,
@@ -251,7 +257,11 @@ Customer: ${request.text}`;
         //    dispatchable message is persisted BEFORE the response and the
         //    agent turn runs in the background worker — Chatwoot never sees
         //    agent failures, and nothing is lost on gateway restart.
-        const ack = await prepareInboundAck(rawBody, eventDeps, { spool, recordFor });
+        const ack = await prepareInboundAck(
+          rawBody,
+          eventDeps,
+          queueEnabled ? { spool, recordFor } : {}
+        );
 
         // 2. Respond immediately to Chatwoot (<10ms) so Chatwoot never times out!
         res.statusCode = ack.status;
