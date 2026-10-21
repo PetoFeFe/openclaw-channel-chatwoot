@@ -84,39 +84,6 @@ function registerGatewayMediaProvider(api: Api): void {
   } as never);
 }
 
-/**
- * Chatwoot renders attachment URLs from its public FRONTEND_URL, which may be
- * unreachable or have an untrusted cert from inside the gateway container.
- * Swap the public host for the configured internal base URL when they point
- * at the same Chatwoot; signed blob paths stay intact.
- */
-function makeChatwootUrlRewriter(baseUrl: string): (url: string) => string {
-  let internal: URL | undefined;
-  try {
-    internal = new URL(baseUrl);
-  } catch {
-    internal = undefined;
-  }
-  return (url: string) => {
-    if (!internal) return url;
-    try {
-      const parsed = new URL(url);
-      // Only Chatwoot-hosted media (ActiveStorage paths, or a chatwoot-named
-      // host) gets pointed at the configured internal base URL; the signed
-      // blob path is preserved. Already-internal URLs pass through untouched.
-      const looksLikeChatwootMedia =
-        parsed.pathname.startsWith("/rails/") || /chatwoot/i.test(parsed.hostname);
-      if (!looksLikeChatwootMedia) return url;
-      if (parsed.host === internal.host) return url;
-      const rewritten = new URL(parsed.pathname + parsed.search, internal);
-      return rewritten.toString();
-    } catch {
-      /* not a URL; pass through */
-    }
-    return url;
-  };
-}
-
 /** Best-effort file extension so the media store keeps a recognizable name. */
 function extFromMime(mime: string): string {
   const subtype = (mime.split("/")[1] ?? "").split(";")[0].trim().toLowerCase();
@@ -160,40 +127,57 @@ function chatwootMediaHeaders(): Record<string, string> {
 async function stageAttachments(
   attachments: Array<Record<string, unknown>>,
   log: { warn?: (msg: string, ctx?: Record<string, unknown>) => void },
-  conversationId: string,
-  mediaUrlRewrite?: (url: string) => string
+  conversationId: string
 ): Promise<StagedAttachment[]> {
-  const { saveRemoteMedia } = await import("openclaw/plugin-sdk/media-runtime");
+  const { saveMediaBuffer } = await import("openclaw/plugin-sdk/media-runtime");
   const out: StagedAttachment[] = [];
   for (const att of attachments) {
     const mime = String(att.content_type ?? att.mime_type ?? "audio/ogg");
-    const rawUrl = mediaUrlRewrite ? mediaUrlRewrite(String(att.data_url ?? "")) : String(att.data_url ?? "");
-    if (!rawUrl) continue;
+    const rawUrl = String(att.data_url ?? "");
+    if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) continue;
     try {
-      const saved = await saveRemoteMedia({
-        url: rawUrl,
-        headers: chatwootMediaHeaders(),
-        subdir: "chatwoot",
-        maxBytes: 25 * 1024 * 1024,
-        fallbackContentType: mime,
-        originalFilename: `chatwoot-${String(att.id ?? Date.now())}.${extFromMime(mime)}`,
-        allowPrivateNetwork: true
-      } as never) as { id?: string; path?: string };
-      out.push({
-        attachment: att,
-        localPath: saved.path,
-        remoteUrl: rawUrl,
-        mime
-      });
+      // Chatwoot serves voice notes from its public (ActiveStorage redirect)
+      // host. Fetch the bytes directly (size-capped, redirects followed), then
+      // persist into the OpenClaw media store so the AGENT's media pipeline
+      // reads a LOCAL path — the channel never interprets the audio.
+      const res = await fetchWithCap(rawUrl, 25 * 1024 * 1024, chatwootMediaHeaders());
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const contentType = res.headers.get("content-type") ?? mime;
+      const saved = await saveMediaBuffer(
+        buffer,
+        contentType,
+        "chatwoot",
+        25 * 1024 * 1024,
+        `chatwoot-${String(att.id ?? Date.now())}.${extFromMime(contentType)}`
+      );
+      out.push({ attachment: att, localPath: saved.path, remoteUrl: rawUrl, mime: contentType });
     } catch (error) {
       log.warn?.("chatwoot: audio staging failed; passing raw URL through", {
         conversationId,
-        error: String(error)
+        error: (error as Error)?.message ?? String(error)
       });
       out.push({ attachment: att, remoteUrl: rawUrl, mime });
     }
   }
   return out;
+}
+
+/** fetch with a hard response-size cap and header propagation. */
+async function fetchWithCap(
+  url: string,
+  maxBytes: number,
+  headers: Record<string, string>
+): Promise<Response> {
+  const res = await fetch(url, { redirect: "follow", headers });
+  if (!res.ok) throw new Error(`fetch ${url.slice(0, 60)} -> HTTP ${res.status}`);
+  const declared = Number(res.headers.get("content-length") ?? "0");
+  if (declared && declared > maxBytes) throw new Error(`attachment exceeds ${maxBytes} bytes`);
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength > maxBytes) throw new Error(`attachment exceeds ${maxBytes} bytes`);
+  return new Response(buf, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "" }
+  });
 }
 
 export default defineChannelPluginEntry({
@@ -257,12 +241,7 @@ export default defineChannelPluginEntry({
       // transcribe/understand them. Staging failure still passes the raw URL.
       const mediaFacts: Array<{ path?: string; url?: string; contentType?: string }> = [];
       if (audio.length > 0) {
-        const staged = await stageAttachments(
-          audio,
-          api.logger,
-          request.conversationId,
-          makeChatwootUrlRewriter(config.baseUrl)
-        );
+        const staged = await stageAttachments(audio, api.logger, request.conversationId);
         for (const item of staged) {
           mediaFacts.push({
             path: item.localPath,
