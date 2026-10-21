@@ -240,7 +240,7 @@ describe("AgentBot webhook support", () => {
     });
   });
 
-  it("suppresses incoming messages while the conversation is human-owned (open/snoozed)", () => {
+  it("defers human-owned messages when the durable queue is on", () => {
     for (const status of ["open", "snoozed"]) {
       const decision = classifyInbound(
         parseWebhook(
@@ -250,8 +250,25 @@ describe("AgentBot webhook support", () => {
         ),
         botConfig()
       );
-      expect(decision).toMatchObject({ action: "ignore", reason: "human-owned-status" });
+      expect(decision).toMatchObject({
+        action: "defer",
+        reason: "human-owned-status",
+        conversationId: "120",
+        conversationStatus: status
+      });
     }
+  });
+
+  it("ignores human-owned messages when the queue is disabled (legacy path)", () => {
+    const decision = classifyInbound(
+      parseWebhook(
+        JSON.stringify(
+          makeMessageEvent({ accountId: 3, conversationId: 120, inboxId: 4, status: "open" })
+        )
+      ),
+      botConfig({ queueEnabled: false })
+    );
+    expect(decision).toMatchObject({ action: "ignore", reason: "human-owned-status" });
   });
 
   it("does not apply status suppression on non-bot inboxes", () => {

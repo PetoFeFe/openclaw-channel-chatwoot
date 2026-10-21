@@ -58,7 +58,7 @@ export interface ChatwootWebhookConversation extends Record<string, unknown> {
 
 export type ChatwootWebhookEvent = ChatwootWebhookMessage | ChatwootWebhookConversation;
 
-export type InboundAction = "dispatch" | "ignore";
+export type InboundAction = "dispatch" | "ignore" | "defer";
 
 export interface InboundDecision {
   action: InboundAction;
@@ -288,22 +288,20 @@ export function classifyInbound(
     return { action: "ignore", reason: "missing-conversation" };
   }
   // AgentBot inboxes: Chatwoot's conversation status is the ownership signal.
-  // `pending` => the bot (Tata) owns it; `open`/`snoozed` => a human owns it
-  // and automatic replies are suppressed without any plugin-side state.
+  // `pending` => the bot (Tata) owns it. `open`/`snoozed` => a human owns it.
+  // On the durable-queue path a human-owned message must still be ACCEPTED
+  // (200) so Chatwoot considers the delivery done; the queue worker holds the
+  // record (and rechecks the live status) until the conversation returns to
+  // pending. Returning "ignore" here would drop the message from the queue.
   const status = typeof msg.conversation?.status === "string" ? msg.conversation.status : undefined;
   const inboxId = idString(msg.inbox?.id ?? msg.conversation?.inbox_id);
-  if (isBotInbox(inboxId, config) && status !== undefined && HUMAN_OWNED_STATUSES.has(status)) {
-    return { action: "ignore", reason: "human-owned-status" };
-  }
   // The configured account is authoritative for the session key; fall back to
   // the payload (or empty) only when config does not pin an account.
   const scopedAccountId =
     config && config.accountId !== undefined && config.accountId !== null
       ? String(config.accountId)
       : idString(msg.account?.id) ?? "";
-  return {
-    action: "dispatch",
-    reason: "incoming",
+  const fields = {
     accountId: scopedAccountId,
     conversationId,
     messageId: numericId(msg.id),
@@ -313,4 +311,11 @@ export function classifyInbound(
     conversationStatus: status,
     inboxId
   };
+  if (isBotInbox(inboxId, config) && status !== undefined && HUMAN_OWNED_STATUSES.has(status)) {
+    if (config?.queueEnabled === false) {
+      return { action: "ignore", reason: "human-owned-status" };
+    }
+    return { action: "defer", reason: "human-owned-status", ...fields };
+  }
+  return { action: "dispatch", reason: "incoming", ...fields };
 }

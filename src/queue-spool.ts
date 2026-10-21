@@ -212,9 +212,10 @@ export class SpoolQueue {
     this.activeConvs.add(key);
     const spool = this.opts.spool;
     try {
-      // Human-ownership recheck: records accepted while the conversation was
-      // human-owned wait until Chatwoot reports pending again.
-      if (this.opts.client && records.some((r) => HUMAN_OWNED.has(r.statusAtReceipt ?? ""))) {
+      // Human-ownership recheck (live, not just at receipt): a human can take
+      // over between acceptance and dispatch. Hold the batch until the
+      // conversation returns to pending; no attempt is consumed.
+      if (this.opts.client) {
         const live = await this.currentStatus(records[0] as SpoolRecord);
         if (live && HUMAN_OWNED.has(live)) {
           for (const record of records) {
@@ -222,6 +223,26 @@ export class SpoolQueue {
               availableAt: this.shiftIso(this.opts.humanRecheckMs ?? 15_000)
             });
           }
+          this.log.info?.("chatwoot: conversation human-owned; holding batch", {
+            convKey: key,
+            liveStatus: live,
+            messages: records.map((record) => record.messageId)
+          });
+          return;
+        }
+      }
+
+      // Retry-after-crash protection: if Chatwoot already shows a bot reply
+      // newer than the newest queued message, a previous dispatch actually
+      // landed (the agent owns outbound) — complete without answering again.
+      if (this.opts.client) {
+        const answered = await this.alreadyAnswered(records);
+        if (answered) {
+          for (const record of records) await spool.complete(record);
+          this.log.info?.("chatwoot: batch already answered; skipping re-dispatch", {
+            convKey: key,
+            messages: records.map((record) => record.messageId)
+          });
           return;
         }
       }
@@ -307,6 +328,33 @@ export class SpoolQueue {
     } catch (error) {
       this.log.warn?.("chatwoot: conversation status recheck failed", { error: String(error) });
       return undefined;
+    }
+  }
+
+  /**
+   * True when Chatwoot already shows a non-private bot reply newer than the
+   * newest queued customer message: the previous dispatch landed, so the batch
+   * must not be re-run (exactly-once across crash/reconcile/retry).
+   */
+  private async alreadyAnswered(records: readonly SpoolRecord[]): Promise<boolean> {
+    if (!this.opts.client) return false;
+    const conversationId = Number(records[0]?.conversationId);
+    if (!Number.isFinite(conversationId)) return false;
+    const maxMsg = Math.max(
+      ...records.map((record) => record.messageId ?? 0),
+      0
+    );
+    try {
+      const messages = await this.opts.client.listConversationMessages(conversationId);
+      return messages.some((message) => {
+        const outgoing = message.message_type === 1 || message.message_type === "outgoing";
+        return outgoing && message.private !== true && message.id > maxMsg;
+      });
+    } catch (error) {
+      this.log.warn?.("chatwoot: already-answered check failed; dispatching", {
+        error: String(error)
+      });
+      return false;
     }
   }
 

@@ -120,10 +120,14 @@ export async function prepareInboundAck(
 
   // 3. Filter outgoing/private/self messages & verify accountId.
   const decision = classifyInbound(event, config);
+  const willQueue = Boolean(options.spool && options.recordFor);
   if (decision.action === "ignore") {
     return { status: 200, action: "ignored", reason: decision.reason };
   }
-
+  if (decision.action === "defer" && !willQueue) {
+    // Legacy inline path: human-owned means suppressed, exactly as before.
+    return { status: 200, action: "ignored", reason: decision.reason };
+  }
   const accountId = decision.accountId || String(config.accountId);
   const conversationId = decision.conversationId as string;
   const convKey = conversationKey(accountId, conversationId);

@@ -271,8 +271,8 @@ describe("spool queue reconcile", () => {
         { id: 112, status: "pending", inbox_id: 4, last_activity_at: nowSec }
       ],
       listConversationMessages: async () => [
-        { id: 401, content: "lost message", message_type: 0, private: false, created_at: nowSec, sender: { id: 11, type: "contact" } } as never,
-        { id: 402, content: "bot reply", message_type: 1, private: false, created_at: nowSec, sender: { type: "user" } } as never
+        { id: 402, content: "earlier bot reply", message_type: 1, private: false, created_at: nowSec, sender: { type: "user" } } as never,
+        { id: 403, content: "lost message", message_type: 0, private: false, created_at: nowSec, sender: { id: 11, type: "contact" } } as never
       ],
       getConversation: async () => ({ id: 112, status: "pending", inbox_id: 4 })
     };
@@ -293,7 +293,7 @@ describe("spool queue reconcile", () => {
     await waitFor(() => calls.length === 1);
     queue.stop();
     expect(calls[0]?.text).toBe("lost message");
-    expect(calls[0]?.messageId).toBe(401);
+    expect(calls[0]?.messageId).toBe(403);
   });
 
   it("skips conversations on non-bot inboxes", async () => {
@@ -324,5 +324,63 @@ describe("spool queue reconcile", () => {
     await new Promise((r) => setTimeout(r, 120));
     queue.stop();
     expect(calls.length).toBe(0);
+  });
+});
+
+describe("spool queue exactly-once protections", () => {
+  it("skips dispatch when Chatwoot already shows a newer bot reply", async () => {
+    const spool = await freshSpool();
+    const calls: DispatchRequest[] = [];
+    const client: ReconcileSource = {
+      listConversations: async () => [],
+      listConversationMessages: async () => [
+        // bot reply (id 901) newer than queued customer message (id 900)
+        { id: 900, content: "oi", message_type: 0 } as never,
+        { id: 901, content: "ola!", message_type: 1, private: false } as never
+      ],
+      getConversation: async () => ({ id: 112, status: "pending", inbox_id: 4 })
+    };
+    const queue = new SpoolQueue({
+      spool,
+      config,
+      dispatch: async (request) => calls.push(request),
+      toRequest: requestFromRecord,
+      client,
+      tickMs: 10,
+      settleMs: 0
+    });
+    await spool.accept(record({ key: spoolKey("3", 900), messageId: 900 }));
+    await queue.start();
+    await waitFor(async () => (await spool.list("completed")).length === 1);
+    await new Promise((r) => setTimeout(r, 80));
+    queue.stop();
+    expect(calls.length).toBe(0);
+  });
+
+  it("holds batches without consuming attempts while a human owns the conversation", async () => {
+    const spool = await freshSpool();
+    const calls: DispatchRequest[] = [];
+    const client: ReconcileSource = {
+      listConversations: async () => [],
+      listConversationMessages: async () => [],
+      getConversation: async () => ({ id: 112, status: "open", inbox_id: 4 })
+    };
+    const queue = new SpoolQueue({
+      spool,
+      config,
+      dispatch: async (request) => calls.push(request),
+      toRequest: requestFromRecord,
+      client,
+      tickMs: 10,
+      settleMs: 0,
+      humanRecheckMs: 60
+    });
+    await spool.accept(record());
+    await queue.start();
+    await new Promise((r) => setTimeout(r, 200));
+    queue.stop();
+    expect(calls.length).toBe(0);
+    const [held] = await spool.list("inbox");
+    expect(held?.attempt).toBe(0);
   });
 });
