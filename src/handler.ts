@@ -1,5 +1,6 @@
 import { conversationKey, sessionKey } from "./routing.js";
 import type { DurableState } from "./state.js";
+import type { Spool, SpoolRecord } from "./spool.js";
 import type { ChatwootChannelConfig } from "./types.js";
 import {
   classifyInbound,
@@ -45,6 +46,12 @@ export interface WebhookHandlerDeps {
   now?: () => Date;
 }
 
+/** Durable-queue options for prepareInboundAck. */
+export interface AckQueueOptions {
+  spool?: Spool;
+  recordFor?: (request: DispatchRequest) => SpoolRecord;
+}
+
 export interface WebhookHandlerResult {
   status: number;
   action: string;
@@ -73,12 +80,18 @@ function verifyInbound(rawBody: string, deps: WebhookHandlerDeps): boolean {
 }
 
 /**
- * Validates, authenticates, and deduplicates the incoming webhook.
- * Returns the HTTP response acknowledgment and the validated request.
+ * Validates, authenticates, and deduplicates the incoming webhook. Returns the
+ * HTTP response acknowledgment and the validated request.
+ *
+ * With the durable-queue options, a dispatchable message is persisted into the
+ * spool BEFORE answering 200 and performs NO agent work inline: agent
+ * failures are retried by the queue worker and never surface to Chatwoot —
+ * the OpenResponses submission model.
  */
 export async function prepareInboundAck(
   rawBody: string,
-  deps: WebhookHandlerDeps
+  deps: WebhookHandlerDeps,
+  options: { spool?: Spool; recordFor?: (request: DispatchRequest) => SpoolRecord } = {}
 ): Promise<WebhookHandlerResult & { request?: DispatchRequest }> {
   const { config, state } = deps;
   const log = deps.log ?? {};
@@ -115,18 +128,15 @@ export async function prepareInboundAck(
   const conversationId = decision.conversationId as string;
   const convKey = conversationKey(accountId, conversationId);
 
-  // 4. Deduplicate by Chatwoot message id.
-  if (decision.messageId !== undefined) {
-    const msgKey = `msg:${accountId}:${decision.messageId}`;
+  // 4. Deduplicate by Chatwoot message id. The durable spool is the primary
+  //    idempotency store; DurableState remains as a fast in-memory guard.
+  const msgKey =
+    decision.messageId !== undefined ? `msg:${accountId}:${decision.messageId}` : undefined;
+  if (msgKey) {
     const claimed = await state.claimProcessed(msgKey, nowIso());
     if (!claimed) {
       return { status: 200, action: "duplicate", reason: "already-processed" };
     }
-  }
-
-  // 5. Suppress automatic replies while a human owns the conversation.
-  if (state.isHandoffActive(convKey)) {
-    return { status: 200, action: "suppressed-handoff", reason: "human-handoff-active" };
   }
 
   const raw = event as ChatwootWebhookMessage;
@@ -139,6 +149,36 @@ export async function prepareInboundAck(
     senderId: decision.senderId,
     raw
   };
+
+  // 5. Durable queue path: persist before acknowledging, no inline dispatch.
+  if (options.spool && options.recordFor) {
+    try {
+      await options.spool.init();
+      const accepted = await options.spool.accept(options.recordFor(request));
+      if (!accepted) {
+        return { status: 200, action: "duplicate", reason: "already-queued" };
+      }
+    } catch (error) {
+      // Acceptance failed. The plan's contract with the AgentBot is "always
+      // acknowledge accepted messages"; the reconcile loop (Chatwoot as source
+      // of truth) re-discovers this message within one reconcile interval.
+      // Rolling back the dedupe claim also lets an immediate redelivery work.
+      if (msgKey) await state.releaseClaim(msgKey);
+      log.error?.("chatwoot: spool accept FAILED — reconciler will recover", {
+        accountId,
+        conversationId,
+        messageId: decision.messageId,
+        error: (error as Error).message
+      });
+      return { status: 200, action: "accepted", reason: "queue-degraded", request };
+    }
+    return { status: 200, action: "accepted", request };
+  }
+
+  // 6. Legacy path: suppress while a plugin-side handoff is active.
+  if (state.isHandoffActive(convKey)) {
+    return { status: 200, action: "suppressed-handoff", reason: "human-handoff-active" };
+  }
 
   return { status: 200, action: "dispatched", request };
 }

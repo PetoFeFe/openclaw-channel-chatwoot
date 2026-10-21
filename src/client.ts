@@ -28,17 +28,21 @@ export class ChatwootApiError extends Error {
 export interface ChatwootMessage {
   id: number;
   content: string;
-  message_type: "incoming" | "outgoing" | "template";
+  /** String enum in some serializers, integer (0/1/2) in others. */
+  message_type: "incoming" | "outgoing" | "template" | number;
   private: boolean;
   conversation_id?: number;
-  created_at?: string;
+  created_at?: string | number;
+  sender?: { id?: number; type?: string; name?: string };
 }
 
 export interface ChatwootConversation {
   id: number;
   status?: string;
   team_id?: number | null;
+  inbox_id?: number;
   assignee?: unknown;
+  last_activity_at?: number;
 }
 
 export interface SendMessageInput {
@@ -190,11 +194,28 @@ export class ChatwootClient {
     return Array.isArray(res?.payload) ? res.payload : [];
   }
 
+  /** Send a private (internal) note; never customer-visible. */
+  async sendPrivateNote(conversationId: string | number, content: string): Promise<SendMessageResult> {
+    return this.sendMessage({ conversationId, content, private: true });
+  }
+
   async getConversation(conversationId: string | number): Promise<ChatwootConversation> {
     return (await this.request(
       "GET",
       `/conversations/${conversationId}`
     )) as ChatwootConversation;
+  }
+
+  /**
+   * List conversations by status (used by the queue reconciler). Returns the
+   * raw payload items; callers narrow by inbox/status fields.
+   */
+  async listConversationsByStatus(status: "pending" | "open" | "resolved"): Promise<unknown[]> {
+    const res = (await this.request("GET", `/conversations?status=${status}&sort=last_activity_desc`)) as
+      | { payload?: unknown[] }
+      | unknown[];
+    if (Array.isArray(res)) return res;
+    return Array.isArray(res?.payload) ? res.payload : [];
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<unknown> {

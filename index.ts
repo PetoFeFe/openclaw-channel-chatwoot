@@ -18,6 +18,7 @@ import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import {
   chatwootPlugin,
   bindAccountResolver,
+  createClient,
   resolveAccount,
   resolveChatwootConfig
 } from "./src/channel.js";
@@ -26,9 +27,13 @@ import {
   handleConversationEvent,
   prepareInboundAck,
   type Dispatch,
+  type DispatchRequest,
   type WebhookHandlerDeps
 } from "./src/handler.js";
+import { ChatwootConversation } from "./src/client.js";
 import { DurableState } from "./src/state.js";
+import { Spool, spoolKey, type SpoolRecord } from "./src/spool.js";
+import { SpoolQueue, type ReconcileSource } from "./src/queue-spool.js";
 import { DEFAULT_WEBHOOK_HEADER, DEFAULT_WEBHOOK_PATH } from "./src/types.js";
 import { ConversationLanes } from "./src/queue.js";
 
@@ -140,6 +145,66 @@ Customer: ${request.text}`;
       log: api.logger
     });
 
+    // Durable queue (OpenResponses submission model): webhook persists the
+    // accepted event, answers 200, and a background worker drains the spool.
+    const spoolDir = join(stateDir, "spool");
+    const spool = new Spool({ rootDir: spoolDir });
+    const client = createClient(config, pluginConfig.timeoutMs ?? 15000);
+
+    const recordFor = (request: DispatchRequest): SpoolRecord => {
+      const received = new Date();
+      const settleMs = pluginConfig.settleMs ?? 800;
+      return {
+        key: spoolKey(request.accountId, request.messageId ?? `${request.sessionKey}:${received.getTime()}`),
+        accountId: request.accountId,
+        conversationId: request.conversationId,
+        inboxId: request.raw.inbox?.id !== undefined ? String(request.raw.inbox.id) : undefined,
+        messageId: request.messageId,
+        text: request.text,
+        senderId: request.senderId,
+        statusAtReceipt: request.raw.conversation?.status,
+        receivedAt: received.toISOString(),
+        availableAt: new Date(received.getTime() + settleMs).toISOString(),
+        attempt: 0,
+        source: "webhook",
+        payload: request.raw as Record<string, unknown>
+      };
+    };
+
+    const requestFromRecord = (record: SpoolRecord): DispatchRequest => ({
+      accountId: record.accountId,
+      conversationId: record.conversationId,
+      sessionKey: `chatwoot:${record.accountId}:${record.conversationId}`,
+      text: record.text,
+      messageId: record.messageId,
+      senderId: record.senderId,
+      raw: record.payload as DispatchRequest["raw"]
+    });
+
+    const reconcileSource: ReconcileSource = {
+      listConversations: async () =>
+        (await client.listConversationsByStatus("pending")) as ChatwootConversation[],
+      listConversationMessages: (conversationId: number) => client.listMessages(conversationId),
+      getConversation: (conversationId: number) => client.getConversation(conversationId)
+    };
+
+    const queue = new SpoolQueue({
+      spool,
+      config,
+      dispatch,
+      toRequest: requestFromRecord,
+      client: reconcileSource,
+      log: api.logger,
+      settleMs: pluginConfig.settleMs,
+      privateNote: async (record, reason) => {
+        await client.sendPrivateNote(
+          record.conversationId,
+          `OpenClaw queue: message ${record.messageId} exhausted dispatch retries (${reason}).`
+        );
+      }
+    });
+    void queue.start();
+
     const deps: WebhookHandlerDeps = {
       config,
       state,
@@ -182,17 +247,26 @@ Customer: ${request.text}`;
           return;
         }
 
-        // 1. Prepare and validate the ack
-        const ack = await prepareInboundAck(rawBody, eventDeps);
+        // 1. Prepare and validate the ack. With the durable queue enabled, a
+        //    dispatchable message is persisted BEFORE the response and the
+        //    agent turn runs in the background worker — Chatwoot never sees
+        //    agent failures, and nothing is lost on gateway restart.
+        const ack = await prepareInboundAck(rawBody, eventDeps, { spool, recordFor });
 
         // 2. Respond immediately to Chatwoot (<10ms) so Chatwoot never times out!
         res.statusCode = ack.status;
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ ok: ack.status === 200, action: ack.action, reason: ack.reason }));
 
-        // 3. Run the agent turn inside this handler so the Gateway root task
-        //    stays admitted for the whole run. The lane serializes + coalesces
-        //    turns per conversation so bursts never start concurrent turns.
+        // 3. Durable queue path: worker drains asynchronously; only wake it.
+        if (ack.action === "accepted") {
+          queue.wake();
+          return;
+        }
+
+        // Legacy inline path (kept for backward compatibility when the spool
+        // is disabled): run the agent turn inside this handler so the Gateway
+        // root task stays admitted for the whole run.
         if (ack.action === "dispatched" && ack.request) {
           await dispatchAdmitted(ack.request, eventDeps);
         }

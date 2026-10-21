@@ -2,9 +2,13 @@
   "id": "chatwoot",
   "name": "Chatwoot",
   "description": "Native OpenClaw channel plugin for Chatwoot. Chatwoot stays the source of truth for conversations and human support; OpenClaw handles AI execution.",
-  "version": "0.3.4",
-  "channels": ["chatwoot"],
-  "categories": ["channels"],
+  "version": "0.4.0",
+  "channels": [
+    "chatwoot"
+  ],
+  "categories": [
+    "channels"
+  ],
   "channelConfigs": {
     "chatwoot": {
       "schema": {
@@ -16,7 +20,10 @@
             "description": "Chatwoot base URL, e.g. https://app.chatwoot.com"
           },
           "accountId": {
-            "type": ["integer", "string"],
+            "type": [
+              "integer",
+              "string"
+            ],
             "description": "Chatwoot account id"
           },
           "apiToken": {
@@ -33,12 +40,20 @@
           },
           "botInboxIds": {
             "type": "array",
-            "items": { "type": ["integer", "string"] },
+            "items": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
             "description": "Inbox ids driven by a Chatwoot AgentBot. On these inboxes the conversation status is the ownership signal: pending = bot answers; open/snoozed = human-owned (automatic replies suppressed)."
           },
           "webhookSignatureMode": {
             "type": "string",
-            "enum": ["chatwoot", "custom"],
+            "enum": [
+              "chatwoot",
+              "custom"
+            ],
             "default": "chatwoot",
             "description": "chatwoot (native X-Chatwoot-Signature, default) or custom (body HMAC in webhookHeader)"
           },
@@ -59,7 +74,10 @@
             "description": "Gateway HTTP path that receives Chatwoot webhooks"
           },
           "receptionTeamId": {
-            "type": ["integer", "string"],
+            "type": [
+              "integer",
+              "string"
+            ],
             "description": "Chatwoot team id that human reception is assigned to"
           },
           "receptionTeamName": {
@@ -67,7 +85,10 @@
             "description": "Optional human-readable reception team name (diagnostics only)"
           },
           "administrationTeamId": {
-            "type": ["integer", "string"],
+            "type": [
+              "integer",
+              "string"
+            ],
             "description": "Chatwoot team id for administration (Level 2). Used to validate agent-requested handoffs."
           },
           "administrationTeamName": {
@@ -76,7 +97,9 @@
           },
           "fallbackModels": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Deprecated: model failover is owned by OpenClaw core (agents.defaults.model.fallbacks). Accepted for backward compatibility but not used for dispatch."
           },
           "handoffNotice": {
@@ -94,23 +117,47 @@
           },
           "allowFrom": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
           "dmSecurity": {
             "type": "string",
             "description": "DM policy (e.g. allowlist, open)"
           }
         },
-        "required": ["baseUrl", "accountId", "apiToken"]
+        "required": [
+          "baseUrl",
+          "accountId",
+          "apiToken"
+        ]
       },
       "uiHints": {
-        "apiToken": { "label": "Chatwoot API token", "sensitive": true },
-        "webhookSecret": { "label": "Webhook secret", "sensitive": true },
-        "agentBotWebhookSecret": { "label": "AgentBot webhook secret", "sensitive": true },
-        "baseUrl": { "label": "Chatwoot base URL", "placeholder": "https://app.chatwoot.com" },
-        "accountId": { "label": "Account id" },
-        "receptionTeamId": { "label": "Reception team id" },
-        "administrationTeamId": { "label": "Administration team id" }
+        "apiToken": {
+          "label": "Chatwoot API token",
+          "sensitive": true
+        },
+        "webhookSecret": {
+          "label": "Webhook secret",
+          "sensitive": true
+        },
+        "agentBotWebhookSecret": {
+          "label": "AgentBot webhook secret",
+          "sensitive": true
+        },
+        "baseUrl": {
+          "label": "Chatwoot base URL",
+          "placeholder": "https://app.chatwoot.com"
+        },
+        "accountId": {
+          "label": "Account id"
+        },
+        "receptionTeamId": {
+          "label": "Reception team id"
+        },
+        "administrationTeamId": {
+          "label": "Administration team id"
+        }
       }
     }
   },

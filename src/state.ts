@@ -111,6 +111,16 @@ export class DurableState {
     return true;
   }
 
+  /**
+   * Roll back a claim made by claimProcessed (used when durable queueing of a
+   * message fails after the claim, so a redelivery can retry end-to-end).
+   */
+  async releaseClaim(key: string): Promise<void> {
+    if (!Object.prototype.hasOwnProperty.call(this.data.processed, key)) return;
+    delete this.data.processed[key];
+    await this.persist();
+  }
+
   // ---- handoff status ----
 
   getHandoff(convKey: string): HandoffState | undefined {
