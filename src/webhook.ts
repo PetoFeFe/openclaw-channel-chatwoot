@@ -58,7 +58,7 @@ export interface ChatwootWebhookConversation extends Record<string, unknown> {
 
 export type ChatwootWebhookEvent = ChatwootWebhookMessage | ChatwootWebhookConversation;
 
-export type InboundAction = "dispatch" | "ignore" | "defer";
+export type InboundAction = "dispatch" | "ignore";
 
 export interface InboundDecision {
   action: InboundAction;
@@ -233,23 +233,6 @@ function messageTextOf(msg: ChatwootWebhookMessage): string {
 }
 
 /**
- * Conversation status values that mean a HUMAN owns the conversation: on an
- * AgentBot inbox, `pending` belongs to the bot and `open`/`snoozed` belong to
- * human agents. `resolved` belongs to neither (the next customer message
- * re-pends it so the bot resumes).
- */
-export const HUMAN_OWNED_STATUSES = new Set(["open", "snoozed"]);
-
-/** True when the event's inbox is one of the configured AgentBot inboxes. */
-export function isBotInbox(
-  inboxId: string | undefined,
-  config?: ChatwootChannelConfig
-): boolean {
-  if (inboxId === undefined || !config?.botInboxIds?.length) return false;
-  return config.botInboxIds.some((id) => String(id) === inboxId);
-}
-
-/**
  * Decide whether an event should be dispatched to the agent.
  *
  * Outgoing agent/bot messages and private notes are filtered out to prevent
@@ -287,12 +270,6 @@ export function classifyInbound(
   if (conversationId === undefined) {
     return { action: "ignore", reason: "missing-conversation" };
   }
-  // AgentBot inboxes: Chatwoot's conversation status is the ownership signal.
-  // `pending` => the bot (Tata) owns it. `open`/`snoozed` => a human owns it.
-  // On the durable-queue path a human-owned message must still be ACCEPTED
-  // (200) so Chatwoot considers the delivery done; the queue worker holds the
-  // record (and rechecks the live status) until the conversation returns to
-  // pending. Returning "ignore" here would drop the message from the queue.
   const status = typeof msg.conversation?.status === "string" ? msg.conversation.status : undefined;
   const inboxId = idString(msg.inbox?.id ?? msg.conversation?.inbox_id);
   // The configured account is authoritative for the session key; fall back to
@@ -301,7 +278,13 @@ export function classifyInbound(
     config && config.accountId !== undefined && config.accountId !== null
       ? String(config.accountId)
       : idString(msg.account?.id) ?? "";
-  const fields = {
+  // Conversation status is NOT an ingress filter: ownership decisions
+  // (human takeover on AgentBot inboxes) belong to the agent, which receives
+  // the status in its inbound prompt. The plugin always dispatches valid
+  // incoming customer messages.
+  return {
+    action: "dispatch",
+    reason: "incoming",
     accountId: scopedAccountId,
     conversationId,
     messageId: numericId(msg.id),
@@ -311,11 +294,4 @@ export function classifyInbound(
     conversationStatus: status,
     inboxId
   };
-  if (isBotInbox(inboxId, config) && status !== undefined && HUMAN_OWNED_STATUSES.has(status)) {
-    if (config?.queueEnabled === false) {
-      return { action: "ignore", reason: "human-owned-status" };
-    }
-    return { action: "defer", reason: "human-owned-status", ...fields };
-  }
-  return { action: "dispatch", reason: "incoming", ...fields };
 }

@@ -86,7 +86,8 @@ export default defineChannelPluginEntry({
           : `${request.sessionKey}:${Date.now()}`;
 
       // Inbound context: provide clear conversation details to the agent
-      const promptText = `[Chatwoot Conversation ${request.conversationId} | Account ${request.accountId}]
+      const statusNote = request.status ?? "unknown";
+      const promptText = `[Chatwoot Conversation ${request.conversationId} | Account ${request.accountId} | Status: ${statusNote}]
 Customer: ${request.text}`;
 
       const ctxPayload = api.runtime.channel.reply.finalizeInboundContext({
@@ -166,7 +167,7 @@ Customer: ${request.text}`;
         messageId: request.messageId,
         text: request.text,
         senderId: request.senderId,
-        statusAtReceipt: request.raw.conversation?.status,
+        statusAtReceipt: request.status ?? request.raw.conversation?.status,
         receivedAt: received.toISOString(),
         availableAt: new Date(received.getTime() + settleMs).toISOString(),
         attempt: 0,
@@ -182,6 +183,7 @@ Customer: ${request.text}`;
       text: record.text,
       messageId: record.messageId,
       senderId: record.senderId,
+      status: record.statusAtReceipt,
       raw: record.payload as DispatchRequest["raw"]
     });
 

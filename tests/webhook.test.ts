@@ -240,7 +240,9 @@ describe("AgentBot webhook support", () => {
     });
   });
 
-  it("defers human-owned messages when the durable queue is on", () => {
+  it("dispatches human-owned messages too — the AGENT owns the handoff decision", () => {
+    // v0.4: ingress never filters on conversation status. Human takeover is
+    // decided by Tata from the live status in the inbound prompt, not here.
     for (const status of ["open", "snoozed"]) {
       const decision = classifyInbound(
         parseWebhook(
@@ -251,27 +253,15 @@ describe("AgentBot webhook support", () => {
         botConfig()
       );
       expect(decision).toMatchObject({
-        action: "defer",
-        reason: "human-owned-status",
+        action: "dispatch",
+        reason: "incoming",
         conversationId: "120",
         conversationStatus: status
       });
     }
   });
 
-  it("ignores human-owned messages when the queue is disabled (legacy path)", () => {
-    const decision = classifyInbound(
-      parseWebhook(
-        JSON.stringify(
-          makeMessageEvent({ accountId: 3, conversationId: 120, inboxId: 4, status: "open" })
-        )
-      ),
-      botConfig({ queueEnabled: false })
-    );
-    expect(decision).toMatchObject({ action: "ignore", reason: "human-owned-status" });
-  });
-
-  it("does not apply status suppression on non-bot inboxes", () => {
+  it("does not apply status filtering on non-bot inboxes either", () => {
     const decision = classifyInbound(
       parseWebhook(
         JSON.stringify(

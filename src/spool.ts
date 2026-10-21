@@ -35,6 +35,13 @@ export interface SpoolRecord {
   availableAt: string;
   /** Dispatch attempts already made (excludes human-owned requeues). */
   attempt: number;
+  /**
+   * How many times this record has ever been claimed. claims>=2 means a
+   * previous claim ended without a recorded completion (crash between dispatch
+   * and complete, or a retried failure) — only then may the already-answered
+   * shortcut skip the batch.
+   */
+  claims?: number;
   /** ISO deadline after which a processing record is considered abandoned. */
   leaseUntil?: string;
   lastError?: string;
@@ -168,7 +175,11 @@ export class Spool {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
       throw error;
     }
-    const claimed: SpoolRecord = { ...record, leaseUntil };
+    const claimed: SpoolRecord = {
+      ...record,
+      leaseUntil,
+      claims: (record.claims ?? 0) + 1
+    };
     await this.write("processing", claimed).catch(() => {
       /* lease patch is best-effort; recovery requeues on expiry */
     });

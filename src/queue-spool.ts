@@ -59,13 +59,9 @@ export interface SpoolQueueOptions {
   reconcileIntervalMs?: number;
   /** Reconcile only messages/conversations newer than this (s). Default 3600. */
   reconcileLookbackSec?: number;
-  /** Re-check delay while a human owns the conversation (ms). Default 15000. */
-  humanRecheckMs?: number;
   now?: () => Date;
   privateNote?: (record: SpoolRecord, reason: string) => Promise<void>;
 }
-
-const HUMAN_OWNED = new Set(["open", "snoozed"]);
 
 function isTransientError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -212,41 +208,6 @@ export class SpoolQueue {
     this.activeConvs.add(key);
     const spool = this.opts.spool;
     try {
-      // Human-ownership recheck (live, not just at receipt): a human can take
-      // over between acceptance and dispatch. Hold the batch until the
-      // conversation returns to pending; no attempt is consumed.
-      if (this.opts.client) {
-        const live = await this.currentStatus(records[0] as SpoolRecord);
-        if (live && HUMAN_OWNED.has(live)) {
-          for (const record of records) {
-            await spool.requeue(record, {
-              availableAt: this.shiftIso(this.opts.humanRecheckMs ?? 15_000)
-            });
-          }
-          this.log.info?.("chatwoot: conversation human-owned; holding batch", {
-            convKey: key,
-            liveStatus: live,
-            messages: records.map((record) => record.messageId)
-          });
-          return;
-        }
-      }
-
-      // Retry-after-crash protection: if Chatwoot already shows a bot reply
-      // newer than the newest queued message, a previous dispatch actually
-      // landed (the agent owns outbound) — complete without answering again.
-      if (this.opts.client) {
-        const answered = await this.alreadyAnswered(records);
-        if (answered) {
-          for (const record of records) await spool.complete(record);
-          this.log.info?.("chatwoot: batch already answered; skipping re-dispatch", {
-            convKey: key,
-            messages: records.map((record) => record.messageId)
-          });
-          return;
-        }
-      }
-
       const claimed: SpoolRecord[] = [];
       for (const record of records) {
         const got = await spool.claim(record, this.shiftIso(this.opts.leaseMs ?? 300_000));
@@ -254,10 +215,33 @@ export class SpoolQueue {
       }
       if (claimed.length === 0) return;
 
+      // Redelivery protection: a record claimed more than once means a
+      // previous dispatch ended without a recorded completion (crash before
+      // complete). If Chatwoot already shows a bot reply newer than the
+      // newest queued message, that reply landed — complete without answering
+      // again. (The agent owns the human-handoff silence decision; the plugin
+      // does not filter on conversation status.)
+      const redelivered = claimed.some((record) => (record.claims ?? 0) >= 2);
+      if (redelivered && this.opts.client) {
+        const answered = await this.alreadyAnswered(claimed);
+        if (answered) {
+          for (const record of claimed) await spool.complete(record);
+          this.log.info?.("chatwoot: batch already answered; skipping re-dispatch", {
+            convKey: key,
+            messages: claimed.map((record) => record.messageId)
+          });
+          return;
+        }
+      }
+
       const batch = this.opts.toRequest(claimed[claimed.length - 1] as SpoolRecord);
       if (claimed.length > 1) {
         batch.text = claimed.map((record) => record.text).join("\n");
       }
+      // Pass the live conversation status to the agent: the agent decides
+      // whether a human owns the conversation and must stay silent.
+      const live = await this.currentStatus(claimed[0] as SpoolRecord);
+      if (live) batch.status = live;
       const attemptStart = Math.max(...claimed.map((record) => record.attempt));
       try {
         await this.opts.dispatch(batch);

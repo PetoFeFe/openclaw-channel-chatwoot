@@ -60,11 +60,6 @@ export interface ChatwootChannelConfig {
   allowFrom?: string[];
   /** DM policy (optional). */
   dmSecurity?: string;
-  /**
-   * Durable inbound queue (spool + background worker). Defaults to true; set
-   * false to restore the legacy inline lane dispatch (e.g. quick rollback).
-   */
-  queueEnabled?: boolean;
 }
 
 export interface ChatwootPluginConfig {
@@ -126,7 +121,6 @@ export function normalizeChannelConfig(raw: Record<string, unknown> = {}): Chatw
     handoffNoteTemplate: raw.handoffNoteTemplate ? String(raw.handoffNoteTemplate) : DEFAULT_HANDOFF_NOTE,
     maxRetries: typeof raw.maxRetries === "number" ? raw.maxRetries : DEFAULT_MAX_RETRIES,
     allowFrom: Array.isArray(raw.allowFrom) ? (raw.allowFrom as unknown[]).map(String) : undefined,
-    dmSecurity: raw.dmSecurity ? String(raw.dmSecurity) : undefined,
-    queueEnabled: raw.queueEnabled === false ? false : true
+    dmSecurity: raw.dmSecurity ? String(raw.dmSecurity) : undefined
   };
 }

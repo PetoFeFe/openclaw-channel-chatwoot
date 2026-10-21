@@ -18,6 +18,8 @@ export interface DispatchRequest {
   sessionKey: string;
   text: string;
   messageId?: number;
+  /** Conversation status at receipt (agent owns the handoff decision). */
+  status?: string;
   senderId?: string;
   raw: ChatwootWebhookMessage;
 }
@@ -120,12 +122,7 @@ export async function prepareInboundAck(
 
   // 3. Filter outgoing/private/self messages & verify accountId.
   const decision = classifyInbound(event, config);
-  const willQueue = Boolean(options.spool && options.recordFor);
   if (decision.action === "ignore") {
-    return { status: 200, action: "ignored", reason: decision.reason };
-  }
-  if (decision.action === "defer" && !willQueue) {
-    // Legacy inline path: human-owned means suppressed, exactly as before.
     return { status: 200, action: "ignored", reason: decision.reason };
   }
   const accountId = decision.accountId || String(config.accountId);
@@ -151,6 +148,7 @@ export async function prepareInboundAck(
     text: decision.text as string,
     messageId: decision.messageId,
     senderId: decision.senderId,
+    status: decision.conversationStatus,
     raw
   };
 

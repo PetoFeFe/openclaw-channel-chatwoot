@@ -47,6 +47,7 @@ function requestFromRecord(rec: SpoolRecord): DispatchRequest {
     sessionKey: `chatwoot:${rec.accountId}:${rec.conversationId}`,
     text: rec.text,
     messageId: rec.messageId,
+    status: rec.statusAtReceipt,
     raw: rec.payload as DispatchRequest["raw"]
   };
 }
@@ -179,14 +180,15 @@ describe("spool queue dispatch", () => {
     expect(failed?.lastError).toContain("model exploded");
   });
 
-  it("requeues records received while a human owns the conversation until it is pending again", async () => {
+  it("passes the LIVE conversation status to the agent (agent owns handoff)", async () => {
+    // The plugin no longer suppresses human-owned conversations at ingress:
+    // it always dispatches and hands the live status to Tata, who stays silent.
     const spool = await freshSpool();
     const calls: DispatchRequest[] = [];
-    let status = "open";
     const client: ReconcileSource = {
       listConversations: async () => [],
       listConversationMessages: async () => [],
-      getConversation: async () => ({ id: 112, status, inbox_id: 4 })
+      getConversation: async () => ({ id: 112, status: "open", inbox_id: 4 })
     };
     const queue = new SpoolQueue({
       spool,
@@ -195,16 +197,13 @@ describe("spool queue dispatch", () => {
       toRequest: requestFromRecord,
       client,
       tickMs: 10,
-      settleMs: 0,
-      humanRecheckMs: 100
+      settleMs: 0
     });
-    await spool.accept(record({ statusAtReceipt: "open" }));
+    await spool.accept(record({ statusAtReceipt: "pending" }));
     await queue.start();
-    await new Promise((r) => setTimeout(r, 100));
-    expect(calls.length).toBe(0);
-    status = "pending";
-    await waitFor(() => calls.length === 1, 5000);
+    await waitFor(() => calls.length === 1);
     queue.stop();
+    expect(calls[0]?.status).toBe("open");
   });
 
   it("recovers expired leases from processing/ on startup", async () => {
@@ -349,7 +348,9 @@ describe("spool queue exactly-once protections", () => {
       tickMs: 10,
       settleMs: 0
     });
-    await spool.accept(record({ key: spoolKey("3", 900), messageId: 900 }));
+    // claims:1 => claim() bumps to 2, marking this a redelivery so the
+    // already-answered shortcut applies.
+    await spool.accept(record({ key: spoolKey("3", 900), messageId: 900, claims: 1 }));
     await queue.start();
     await waitFor(async () => (await spool.list("completed")).length === 1);
     await new Promise((r) => setTimeout(r, 80));
@@ -357,13 +358,15 @@ describe("spool queue exactly-once protections", () => {
     expect(calls.length).toBe(0);
   });
 
-  it("holds batches without consuming attempts while a human owns the conversation", async () => {
+  it("does NOT skip a first dispatch even when a newer bot reply exists (only redeliveries are checked)", async () => {
     const spool = await freshSpool();
     const calls: DispatchRequest[] = [];
     const client: ReconcileSource = {
       listConversations: async () => [],
-      listConversationMessages: async () => [],
-      getConversation: async () => ({ id: 112, status: "open", inbox_id: 4 })
+      listConversationMessages: async () => [
+        { id: 999, content: "some reply", message_type: 1, private: false } as never
+      ],
+      getConversation: async () => ({ id: 112, status: "pending", inbox_id: 4 })
     };
     const queue = new SpoolQueue({
       spool,
@@ -372,15 +375,11 @@ describe("spool queue exactly-once protections", () => {
       toRequest: requestFromRecord,
       client,
       tickMs: 10,
-      settleMs: 0,
-      humanRecheckMs: 60
+      settleMs: 0
     });
-    await spool.accept(record());
+    await spool.accept(record({ key: spoolKey("3", 100), messageId: 100 })); // claims starts undefined
     await queue.start();
-    await new Promise((r) => setTimeout(r, 200));
+    await waitFor(() => calls.length === 1);
     queue.stop();
-    expect(calls.length).toBe(0);
-    const [held] = await spool.list("inbox");
-    expect(held?.attempt).toBe(0);
   });
 });
