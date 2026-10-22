@@ -182,8 +182,8 @@
       },
       "queueEnabled": {
         "type": "boolean",
-        "default": true,
-        "description": "Durable inbound queue (spool + background worker, OpenResponses submission model). Set false to skip the spool AND the per-conversation lanes: each accepted webhook is submitted straight to the session, and the OpenClaw session queue (messages.queue) owns ordering/coalescing of messages that arrive during an active turn."
+        "default": false,
+        "description": "Legacy durable inbound queue (spool + background worker, OpenResponses submission model). Defaults to false (session-owned ingress): webhooks submit directly to runtime.channel.inbound.run without filesystem spool or per-conversation lanes. Set true only to re-enable legacy spool+lanes."
       },
       "reconcileIntervalMs": {
         "type": "integer",

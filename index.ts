@@ -328,10 +328,12 @@ Customer: ${customerLine}`;
       return { ok: true };
     };
 
-    // Session-runtime experiment: with the durable queue DISABLED, do not
-    // pre-serialize turns either — submit each accepted webhook directly to
-    // the same OpenClaw SessionKey and let the session queue own ordering.
-    const queueEnabled = pluginConfig.queueEnabled !== false;
+    // Inbound delivery: session-owned mode is the default (queueEnabled=false):
+    // no durable spool, no per-conversation lanes, no external coalescing.
+    // Each accepted webhook is submitted directly to the same OpenClaw SessionKey
+    // and the OpenClaw session runtime serializes and persists turns natively.
+    // Set queueEnabled=true only to roll back to the legacy spool+lanes path.
+    const queueEnabled = pluginConfig.queueEnabled === true;
 
     const lanes = queueEnabled
       ? new ConversationLanes({
@@ -473,11 +475,22 @@ Customer: ${customerLine}`;
           return;
         }
 
-        // Legacy inline path (kept for backward compatibility when the spool
-        // is disabled): run the agent turn inside this handler so the Gateway
-        // root task stays admitted for the whole run.
+        // Inbound dispatch: in the default session-owned mode (and backward-
+        // compatible inline mode), run the turn inside this handler so the
+        // Gateway root task stays admitted for the whole run.
+        // On submission/dispatch error: do NOT retry, do NOT auto-handoff, and
+        // do NOT open the conversation. Mark the turn failed internally (log)
+        // and leave the Chatwoot conversation pending without sending any
+        // customer message.
         if (ack.action === "dispatched" && ack.request) {
-          await dispatchAdmitted(ack.request, eventDeps);
+          try {
+            await dispatchAdmitted(ack.request, eventDeps);
+          } catch (err) {
+            const msg = (err as Error)?.message ?? String(err);
+            api.logger.warn?.(
+              `chatwoot: inbound session dispatch failed (conv ${ack.request.conversationId}, msg ${ack.request.messageId}): ${msg}`
+            );
+          }
         }
       }
     });
