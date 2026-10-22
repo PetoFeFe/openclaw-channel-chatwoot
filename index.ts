@@ -328,12 +328,19 @@ Customer: ${customerLine}`;
       return { ok: true };
     };
 
-    const lanes = new ConversationLanes({
-      dispatch,
-      settleMs: pluginConfig.settleMs,
-      dispatchRetries: pluginConfig.dispatchRetries,
-      log: api.logger
-    });
+    // Session-runtime experiment: with the durable queue DISABLED, do not
+    // pre-serialize turns either — submit each accepted webhook directly to
+    // the same OpenClaw SessionKey and let the session queue own ordering.
+    const queueEnabled = pluginConfig.queueEnabled !== false;
+
+    const lanes = queueEnabled
+      ? new ConversationLanes({
+          dispatch,
+          settleMs: pluginConfig.settleMs,
+          dispatchRetries: pluginConfig.dispatchRetries,
+          log: api.logger
+        })
+      : undefined;
 
     // Durable queue (OpenResponses submission model): webhook persists the
     // accepted event, answers 200, and a background worker drains the spool.
@@ -401,7 +408,6 @@ Customer: ${customerLine}`;
         );
       }
     });
-    const queueEnabled = pluginConfig.queueEnabled !== false;
     if (queueEnabled) void queue.start();
 
     const deps: WebhookHandlerDeps = {
