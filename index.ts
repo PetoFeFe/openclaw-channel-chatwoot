@@ -423,6 +423,40 @@ Customer: ${customerLine}`;
     const webhookPath = config.webhookPath ?? DEFAULT_WEBHOOK_PATH;
     const customHeaderName = (config.webhookHeader ?? DEFAULT_WEBHOOK_HEADER).toLowerCase();
 
+    // Lab probe: direct gateway RPC bridge validation
+    api.registerHttpRoute({
+      path: "/chatwoot/probe-gateway",
+      auth: "plugin",
+      handler: async (req, res) => {
+        try {
+          const raw = await readRequestBody(req);
+          const body = raw ? JSON.parse(raw) : {};
+          const isAvail = await (api.runtime as any)?.gateway?.isAvailable?.();
+          let result = null;
+          let createResult = null;
+          if (body.action === "create") {
+            createResult = await (api.runtime as any)?.gateway?.request?.("sessions.create", {
+              key: body.key
+            });
+          }
+          if (body.action === "send") {
+            result = await (api.runtime as any)?.gateway?.request?.("sessions.send", {
+              key: body.key,
+              message: body.message,
+              ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {})
+            });
+          }
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ ok: true, isAvail, createResult, result }));
+        } catch (err: any) {
+          res.statusCode = 500;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ ok: false, error: err?.message ?? String(err), stack: err?.stack }));
+        }
+      }
+    });
+
     api.registerHttpRoute({
       path: webhookPath,
       auth: "plugin",
