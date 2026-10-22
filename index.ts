@@ -300,30 +300,54 @@ Customer: ${customerLine}`;
         }
       });
 
-      // No-op deliverer: the agent delivers replies itself
-      const deliver = async () => {};
-
-      await api.runtime.channel.inbound.run({
-        channel: CHANNEL,
-        accountId: request.accountId,
-        raw: ctxPayload,
-        adapter: {
-          ingest: () => ({
-            id: messageSid,
-            rawText: promptText,
-            raw: ctxPayload
-          }),
-          resolveTurn: () => ({
-            cfg: api.config,
-            channel: CHANNEL,
-            accountId: request.accountId,
-            route,
-            ctxPayload,
-            record: { onRecordError: () => {} },
-            delivery: { deliver, onError: () => {} }
-          })
+      // Inbound delivery:
+      // When queueEnabled === true (legacy), use channel turn adapter with spool/lanes.
+      // Default (queueEnabled === false): submit directly via OpenClaw Gateway sessions.send.
+      // If the session is idle, it starts a turn immediately.
+      // If the session is busy (Tata processing), Gateway steers/coalesces the message
+      // into the active turn target natively (like human typing in webchat).
+      if (queueEnabled) {
+        const deliver = async () => {};
+        await api.runtime.channel.inbound.run({
+          channel: CHANNEL,
+          accountId: request.accountId,
+          raw: ctxPayload,
+          adapter: {
+            ingest: () => ({
+              id: messageSid,
+              rawText: promptText,
+              raw: ctxPayload
+            }),
+            resolveTurn: () => ({
+              cfg: api.config,
+              channel: CHANNEL,
+              accountId: request.accountId,
+              route,
+              ctxPayload,
+              record: { onRecordError: () => {} },
+              delivery: { deliver, onError: () => {} }
+            })
+          }
+        });
+      } else {
+        const { callGatewayFromCli } = await import("openclaw/plugin-sdk/gateway-runtime");
+        const sendParams = {
+          key: coreSessionKey,
+          message: promptText,
+          idempotencyKey: messageSid
+        };
+        try {
+          await callGatewayFromCli("sessions.send", {}, sendParams);
+        } catch (err: any) {
+          const errMsg = String(err?.message ?? err?.details?.message ?? err);
+          if (errMsg.includes("session not found")) {
+            await callGatewayFromCli("sessions.create", {}, { key: coreSessionKey });
+            await callGatewayFromCli("sessions.send", {}, sendParams);
+          } else {
+            throw err;
+          }
         }
-      });
+      }
 
       return { ok: true };
     };
@@ -422,40 +446,6 @@ Customer: ${customerLine}`;
 
     const webhookPath = config.webhookPath ?? DEFAULT_WEBHOOK_PATH;
     const customHeaderName = (config.webhookHeader ?? DEFAULT_WEBHOOK_HEADER).toLowerCase();
-
-    // Lab probe: direct gateway RPC bridge validation
-    api.registerHttpRoute({
-      path: "/chatwoot/probe-gateway",
-      auth: "plugin",
-      handler: async (req, res) => {
-        try {
-          const raw = await readRequestBody(req);
-          const body = raw ? JSON.parse(raw) : {};
-          const { callGatewayFromCli } = await import("openclaw/plugin-sdk/gateway-runtime");
-          let result = null;
-          let createResult = null;
-          if (body.action === "create") {
-            createResult = await callGatewayFromCli("sessions.create", {}, {
-              key: body.key
-            });
-          }
-          if (body.action === "send") {
-            result = await callGatewayFromCli("sessions.send", {}, {
-              key: body.key,
-              message: body.message,
-              ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {})
-            });
-          }
-          res.statusCode = 200;
-          res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify({ ok: true, createResult, result }));
-        } catch (err: any) {
-          res.statusCode = 500;
-          res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify({ ok: false, error: err?.message ?? String(err), stack: err?.stack }));
-        }
-      }
-    });
 
     api.registerHttpRoute({
       path: webhookPath,
