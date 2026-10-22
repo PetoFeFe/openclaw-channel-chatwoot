@@ -431,16 +431,16 @@ Customer: ${customerLine}`;
         try {
           const raw = await readRequestBody(req);
           const body = raw ? JSON.parse(raw) : {};
-          const isAvail = await (api.runtime as any)?.gateway?.isAvailable?.();
+          const { callGatewayFromCli } = await import("openclaw/plugin-sdk/gateway-runtime");
           let result = null;
           let createResult = null;
           if (body.action === "create") {
-            createResult = await (api.runtime as any)?.gateway?.request?.("sessions.create", {
+            createResult = await callGatewayFromCli("sessions.create", {}, {
               key: body.key
             });
           }
           if (body.action === "send") {
-            result = await (api.runtime as any)?.gateway?.request?.("sessions.send", {
+            result = await callGatewayFromCli("sessions.send", {}, {
               key: body.key,
               message: body.message,
               ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {})
@@ -448,7 +448,7 @@ Customer: ${customerLine}`;
           }
           res.statusCode = 200;
           res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify({ ok: true, isAvail, createResult, result }));
+          res.end(JSON.stringify({ ok: true, createResult, result }));
         } catch (err: any) {
           res.statusCode = 500;
           res.setHeader("content-type", "application/json");
