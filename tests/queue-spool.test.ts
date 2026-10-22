@@ -22,7 +22,7 @@ async function freshSpool(): Promise<Spool> {
 }
 
 function record(overrides: Partial<SpoolRecord> = {}): SpoolRecord {
-  const now = new Date("2026-10-21T12:00:00.000Z");
+  const now = new Date();
   return {
     key: spoolKey("3", 100),
     accountId: "3",
@@ -98,9 +98,10 @@ describe("spool queue dispatch", () => {
       tickMs: 10,
       settleMs: 0
     });
-    await spool.accept(record({ key: spoolKey("3", 201), messageId: 201, text: "Oi", receivedAt: "2026-10-21T12:00:00.000Z" }));
-    await spool.accept(record({ key: spoolKey("3", 202), messageId: 202, text: "Tudo bem?", receivedAt: "2026-10-21T12:00:01.000Z" }));
-    await spool.accept(record({ key: spoolKey("3", 203), messageId: 203, text: "Qual o endereco?", receivedAt: "2026-10-21T12:00:02.000Z" }));
+    const t0 = new Date();
+    await spool.accept(record({ key: spoolKey("3", 201), messageId: 201, text: "Oi", receivedAt: new Date(t0.getTime() - 3000).toISOString() }));
+    await spool.accept(record({ key: spoolKey("3", 202), messageId: 202, text: "Tudo bem?", receivedAt: new Date(t0.getTime() - 2000).toISOString() }));
+    await spool.accept(record({ key: spoolKey("3", 203), messageId: 203, text: "Qual o endereco?", receivedAt: new Date(t0.getTime() - 1000).toISOString() }));
     await queue.start();
     await waitFor(() => calls.length >= 1);
     // give a second tick a chance to leak a stray turn
@@ -263,7 +264,7 @@ describe("spool queue dispatch", () => {
 describe("spool queue reconcile", () => {
   it("recovers customer messages the spool never accepted", async () => {
     const spool = await freshSpool();
-    const now = new Date("2026-10-21T12:30:00.000Z");
+    const now = new Date();
     const nowSec = Math.floor(now.getTime() / 1000);
     const client: ReconcileSource = {
       listConversations: async () => [
@@ -317,7 +318,7 @@ describe("spool queue reconcile", () => {
       tickMs: 10,
       settleMs: 0,
       reconcileIntervalMs: 30,
-      now: () => new Date("2026-10-21T12:30:00.000Z")
+      now: () => new Date()
     });
     await queue.start();
     await new Promise((r) => setTimeout(r, 120));

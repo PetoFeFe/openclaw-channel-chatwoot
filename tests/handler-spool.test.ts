@@ -42,8 +42,8 @@ const recordFor = (request: DispatchRequest): SpoolRecord => ({
   text: request.text,
   senderId: request.senderId,
   statusAtReceipt: request.raw.conversation?.status,
-  receivedAt: "2026-10-21T12:00:00.000Z",
-  availableAt: "2026-10-21T12:00:01.000Z",
+  receivedAt: new Date().toISOString(),
+  availableAt: new Date(Date.now() + 1000).toISOString(),
   attempt: 0,
   source: "webhook",
   payload: request.raw as Record<string, unknown>
