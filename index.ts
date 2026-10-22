@@ -45,6 +45,9 @@ import { DEFAULT_WEBHOOK_HEADER, DEFAULT_WEBHOOK_PATH } from "./src/types.js";
 import { ConversationLanes } from "./src/queue.js";
 
 type Api = Parameters<NonNullable<Parameters<typeof defineChannelPluginEntry>[0]["registerFull"]>>[0];
+type CapabilitiesApi = Parameters<
+  NonNullable<Parameters<typeof defineChannelPluginEntry>[0]["registerCapabilities"]>
+>[0];
 
 const CHANNEL = "chatwoot";
 
@@ -60,8 +63,13 @@ interface StagedAttachment {
  * Register `llm-gateway` (the deployment's OpenAI-compatible LLM provider) as
  * an audio-transcription media provider using the shared OpenAI-compatible
  * implementation. Model/base URL come from tools.media config + env.
+ *
+ * MUST be called from `registerCapabilities` (not `registerFull`): the media
+ * capability loader loads plugins in "discovery" mode (`activate: false`),
+ * where `registerFull` is skipped — registering there would make the provider
+ * invisible to the media pipeline.
  */
-function registerGatewayMediaProvider(api: Api): void {
+function registerGatewayMediaProvider(api: CapabilitiesApi): void {
   const defaultModel = "grok-stt-1-0";
   api.registerMediaUnderstandingProvider({
     id: "llm-gateway",
@@ -81,7 +89,7 @@ function registerGatewayMediaProvider(api: Api): void {
         defaultBaseUrl: process.env.LLM_GATEWAY_BASE_URL ?? "https://api.llmgateway.io/v1",
         defaultModel
       })
-  } as never);
+  });
 }
 
 /** Best-effort file extension so the media store keeps a recognizable name. */
@@ -185,6 +193,17 @@ export default defineChannelPluginEntry({
   name: "Chatwoot",
   description: "Native OpenClaw channel plugin for Chatwoot (inbound adapter)",
   plugin: chatwootPlugin,
+  /**
+   * Capabilities are registered in EVERY registration mode (discovery
+   * included) so the media-understanding loader can find the provider.
+   */
+  registerCapabilities(api: CapabilitiesApi) {
+    // Media understanding: register the LLM Gateway as an audio (STT)
+    // capability provider so OpenClaw's own media pipeline can transcribe
+    // voice notes DURING THE TATA AGENT TURN. The channel plugin stages the
+    // bytes (media transport) and never interprets them.
+    registerGatewayMediaProvider(api);
+  },
   registerFull(api: Api) {
     const config = resolveChatwootConfig(api.config);
     const pluginConfig = (api.pluginConfig ?? {}) as {
@@ -203,12 +222,6 @@ export default defineChannelPluginEntry({
 
     // Allow account resolution
     bindAccountResolver((accountId) => resolveAccount(api.config, accountId));
-
-    // Media understanding: register the LLM Gateway as an audio (STT)
-    // capability provider so OpenClaw's own media pipeline can transcribe
-    // voice notes DURING THE TATA AGENT TURN. The channel plugin stages the
-    // bytes (media transport) and never interprets them.
-    registerGatewayMediaProvider(api);
 
     const dispatch: Dispatch = async (request) => {
       // Resolve the routed agent for this conversation
