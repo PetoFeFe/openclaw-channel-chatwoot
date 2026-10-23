@@ -1,19 +1,16 @@
 /**
- * OpenClaw native Chatwoot channel plugin (simplified).
+ * OpenClaw native Chatwoot channel plugin (inbound only).
  *
- * Minimal inbound adapter:
- *   1. Verifies HMAC signature on incoming webhooks (401 on bad signature).
- *   2. Deduplicates incoming messages via durable state.
- *   3. Filters account scope and incoming/private message flags.
- *   4. Acknowledges HTTP 200 immediately to Chatwoot so webhooks never time out.
- *   5. Dispatches the agent turn through the durable spool queue (or the
- *      legacy inline lane). Attachments are only STAGED into the OpenClaw
- *      media store; the channel never transcribes/interprets media — that is
- *      the TATA agent runtime's job (tools.media audio understanding).
+ *   1. Verifies the HMAC signature on incoming webhooks (401 on bad signature).
+ *   2. Deduplicates deliveries and Chatwoot message ids via durable state.
+ *   3. Filters account scope and incoming/private/self messages.
+ *   4. Acknowledges HTTP 200 immediately so Chatwoot webhooks never time out.
+ *   5. Submits the inbound message to the routed OpenClaw agent session.
+ *   6. Stages voice-note/image attachments into the OpenClaw media store; the
+ *      agent runtime owns transcription and understanding.
  *
- * The agent itself (Tata) owns reading Help Center articles and posting
- * replies back to Chatwoot using the Chatwoot CLI/tools. The plugin never
- * sends messages to Chatwoot.
+ * The plugin never sends Chatwoot messages, private notes, or assignments.
+ * Tata owns every Chatwoot action through the official CLI/tools.
  */
 import { join } from "node:path";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
@@ -22,27 +19,18 @@ import {
   type AudioTranscriptionRequest,
   type AudioTranscriptionResult
 } from "openclaw/plugin-sdk/media-understanding";
+import { chatwootPlugin, resolveChatwootConfig } from "./src/channel.js";
 import {
-  chatwootPlugin,
-  bindAccountResolver,
-  createClient,
-  resolveAccount,
-  resolveChatwootConfig
-} from "./src/channel.js";
-import {
-  dispatchAdmitted,
-  handleConversationEvent,
   prepareInboundAck,
   type Dispatch,
-  type DispatchRequest,
   type WebhookHandlerDeps
 } from "./src/handler.js";
-import { ChatwootConversation } from "./src/client.js";
 import { DurableState } from "./src/state.js";
-import { Spool, spoolKey, type SpoolRecord } from "./src/spool.js";
-import { SpoolQueue, type ReconcileSource } from "./src/queue-spool.js";
-import { DEFAULT_WEBHOOK_HEADER, DEFAULT_WEBHOOK_PATH } from "./src/types.js";
-import { ConversationLanes } from "./src/queue.js";
+import {
+  DEFAULT_WEBHOOK_HEADER,
+  DEFAULT_WEBHOOK_PATH,
+  type ChatwootPluginConfig
+} from "./src/types.js";
 
 type Api = Parameters<NonNullable<Parameters<typeof defineChannelPluginEntry>[0]["registerFull"]>>[0];
 type CapabilitiesApi = Parameters<
@@ -121,10 +109,21 @@ function extFromMime(mime: string): string {
   }
 }
 
-/** Bearer auth for downloading Chatwoot-hosted media (private ActiveStorage). */
-function chatwootMediaHeaders(): Record<string, string> {
-  const token = process.env.CHATWOOT_API_TOKEN ?? process.env.OPENCLAW_GATEWAY_TOKEN;
+/** Bearer auth for downloading Chatwoot-hosted inbound media. */
+function chatwootMediaHeaders(apiToken: string): Record<string, string> {
+  const token = apiToken || process.env.CHATWOOT_API_TOKEN || process.env.OPENCLAW_GATEWAY_TOKEN;
   return token ? { "api-access-token": token } : {};
+}
+
+/** Resolve a Chatwoot attachment URL against the configured base URL. */
+function attachmentUrl(rawUrl: string, baseUrl: string): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    const url = new URL(rawUrl, baseUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -135,20 +134,23 @@ function chatwootMediaHeaders(): Record<string, string> {
 async function stageAttachments(
   attachments: Array<Record<string, unknown>>,
   log: { warn?: (msg: string, ctx?: Record<string, unknown>) => void },
-  conversationId: string
+  conversationId: string,
+  baseUrl: string,
+  apiToken: string
 ): Promise<StagedAttachment[]> {
   const { saveMediaBuffer } = await import("openclaw/plugin-sdk/media-runtime");
   const out: StagedAttachment[] = [];
   for (const att of attachments) {
     const mime = String(att.content_type ?? att.mime_type ?? "audio/ogg");
     const rawUrl = String(att.data_url ?? "");
-    if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) continue;
+    const mediaUrl = attachmentUrl(rawUrl, baseUrl);
+    if (!mediaUrl) continue;
     try {
-      // Chatwoot serves voice notes from its public (ActiveStorage redirect)
-      // host. Fetch the bytes directly (size-capped, redirects followed), then
+      // Chatwoot serves voice notes from private ActiveStorage redirect URLs.
+      // Fetch the bytes directly (size-capped, redirects followed), then
       // persist into the OpenClaw media store so the AGENT's media pipeline
       // reads a LOCAL path — the channel never interprets the audio.
-      const res = await fetchWithCap(rawUrl, 25 * 1024 * 1024, chatwootMediaHeaders());
+      const res = await fetchWithCap(mediaUrl, 25 * 1024 * 1024, chatwootMediaHeaders(apiToken));
       const buffer = Buffer.from(await res.arrayBuffer());
       const contentType = res.headers.get("content-type") ?? mime;
       const saved = await saveMediaBuffer(
@@ -158,13 +160,13 @@ async function stageAttachments(
         25 * 1024 * 1024,
         `chatwoot-${String(att.id ?? Date.now())}.${extFromMime(contentType)}`
       );
-      out.push({ attachment: att, localPath: saved.path, remoteUrl: rawUrl, mime: contentType });
+      out.push({ attachment: att, localPath: saved.path, remoteUrl: mediaUrl, mime: contentType });
     } catch (error) {
-      log.warn?.("chatwoot: audio staging failed; passing raw URL through", {
+      log.warn?.("chatwoot: media staging failed; passing raw URL through", {
         conversationId,
         error: (error as Error)?.message ?? String(error)
       });
-      out.push({ attachment: att, remoteUrl: rawUrl, mime });
+      out.push({ attachment: att, remoteUrl: mediaUrl, mime });
     }
   }
   return out;
@@ -191,7 +193,7 @@ async function fetchWithCap(
 export default defineChannelPluginEntry({
   id: "chatwoot",
   name: "Chatwoot",
-  description: "Native OpenClaw channel plugin for Chatwoot (inbound adapter)",
+  description: "Native OpenClaw channel plugin for Chatwoot (inbound only)",
   plugin: chatwootPlugin,
   /**
    * Capabilities are registered in EVERY registration mode (discovery
@@ -206,25 +208,13 @@ export default defineChannelPluginEntry({
   },
   registerFull(api: Api) {
     const config = resolveChatwootConfig(api.config);
-    const pluginConfig = (api.pluginConfig ?? {}) as {
-      stateDir?: string;
-      timeoutMs?: number;
-      settleMs?: number;
-      dispatchRetries?: number;
-      /** Set false to fall back to the legacy inline lane dispatch. */
-      queueEnabled?: boolean;
-      /** Reconcile interval (ms). Default 60000; 0 disables. */
-      reconcileIntervalMs?: number;
-    };
+    const pluginConfig = (api.pluginConfig ?? {}) as ChatwootPluginConfig;
     const stateDir =
       pluginConfig.stateDir ?? process.env.OPENCLAW_CHATWOOT_STATE_DIR ?? api.resolvePath(".state");
     const state = DurableState.open({ filePath: join(stateDir, "chatwoot-state.json") });
 
-    // Allow account resolution
-    bindAccountResolver((accountId) => resolveAccount(api.config, accountId));
-
     const dispatch: Dispatch = async (request) => {
-      // Resolve the routed agent for this conversation
+      // Resolve the routed agent for this conversation.
       const agentRoute = api.runtime.channel.routing.resolveAgentRoute({
         cfg: api.config,
         channel: CHANNEL,
@@ -235,7 +225,6 @@ export default defineChannelPluginEntry({
       const coreSessionKey = request.sessionKey.startsWith("agent:")
         ? request.sessionKey
         : `agent:${agentRoute.agentId}:${request.sessionKey}`;
-      const route = { agentId: agentRoute.agentId, sessionKey: coreSessionKey };
 
       const senderAddress = request.senderId ?? request.conversationId;
       const messageSid =
@@ -243,9 +232,9 @@ export default defineChannelPluginEntry({
           ? String(request.messageId)
           : `${request.sessionKey}:${Date.now()}`;
 
-      // Inbound context: provide clear conversation details to the agent
       const statusNote = request.status ?? "unknown";
-      const audio: Array<Record<string, unknown>> = (request.audioAttachments ?? []) as unknown as Array<Record<string, unknown>>;
+      const audio: Array<Record<string, unknown>> = (request.audioAttachments ??
+        []) as unknown as Array<Record<string, unknown>>;
 
       // Voice notes/images: Chatwoot stores attachments in private
       // ActiveStorage behind redirect URLs that need the Chatwoot API token.
@@ -254,7 +243,13 @@ export default defineChannelPluginEntry({
       // transcribe/understand them. Staging failure still passes the raw URL.
       const mediaFacts: Array<{ path?: string; url?: string; contentType?: string }> = [];
       if (audio.length > 0) {
-        const staged = await stageAttachments(audio, api.logger, request.conversationId);
+        const staged = await stageAttachments(
+          audio,
+          api.logger,
+          request.conversationId,
+          config.baseUrl,
+          config.apiToken
+        );
         for (const item of staged) {
           mediaFacts.push({
             path: item.localPath,
@@ -300,147 +295,34 @@ Customer: ${customerLine}`;
         }
       });
 
-      // Inbound delivery:
-      // When queueEnabled === true (legacy), use channel turn adapter with spool/lanes.
-      // Default (queueEnabled === false): submit directly via OpenClaw Gateway sessions.send.
-      // If the session is idle, it starts a turn immediately.
-      // If the session is busy (Tata processing), Gateway steers/coalesces the message
-      // into the active turn target natively (like human typing in webchat).
-      if (queueEnabled) {
-        const deliver = async () => {};
-        await api.runtime.channel.inbound.run({
-          channel: CHANNEL,
-          accountId: request.accountId,
-          raw: ctxPayload,
-          adapter: {
-            ingest: () => ({
-              id: messageSid,
-              rawText: promptText,
-              raw: ctxPayload
-            }),
-            resolveTurn: () => ({
-              cfg: api.config,
-              channel: CHANNEL,
-              accountId: request.accountId,
-              route,
-              ctxPayload,
-              record: { onRecordError: () => {} },
-              delivery: { deliver, onError: () => {} }
-            })
-          }
-        });
-      } else {
-        const { callGatewayFromCli } = await import("openclaw/plugin-sdk/gateway-runtime");
-        const sendParams = {
-          key: coreSessionKey,
-          message: promptText,
-          idempotencyKey: messageSid
-        };
-        try {
+      // Inbound delivery is session-owned: submit directly through the
+      // OpenClaw Gateway. The session runtime serializes/coalesces turns
+      // natively, so there is no plugin-side queue or lane.
+      const { callGatewayFromCli } = await import("openclaw/plugin-sdk/gateway-runtime");
+      const sendParams = {
+        key: coreSessionKey,
+        message: promptText,
+        idempotencyKey: messageSid
+      };
+      try {
+        await callGatewayFromCli("sessions.send", {}, sendParams);
+      } catch (err: any) {
+        const errMsg = String(err?.message ?? err?.details?.message ?? err);
+        if (errMsg.includes("session not found")) {
+          await callGatewayFromCli("sessions.create", {}, { key: coreSessionKey });
           await callGatewayFromCli("sessions.send", {}, sendParams);
-        } catch (err: any) {
-          const errMsg = String(err?.message ?? err?.details?.message ?? err);
-          if (errMsg.includes("session not found")) {
-            await callGatewayFromCli("sessions.create", {}, { key: coreSessionKey });
-            await callGatewayFromCli("sessions.send", {}, sendParams);
-          } else {
-            throw err;
-          }
+        } else {
+          throw err;
         }
       }
 
       return { ok: true };
     };
 
-    // Inbound delivery: session-owned mode is the default (queueEnabled=false):
-    // no durable spool, no per-conversation lanes, no external coalescing.
-    // Each accepted webhook is submitted directly to the same OpenClaw SessionKey
-    // and the OpenClaw session runtime serializes and persists turns natively.
-    // Set queueEnabled=true only to roll back to the legacy spool+lanes path.
-    const queueEnabled = pluginConfig.queueEnabled === true;
-
-    const lanes = queueEnabled
-      ? new ConversationLanes({
-          dispatch,
-          settleMs: pluginConfig.settleMs,
-          dispatchRetries: pluginConfig.dispatchRetries,
-          log: api.logger
-        })
-      : undefined;
-
-    // Durable queue (OpenResponses submission model): webhook persists the
-    // accepted event, answers 200, and a background worker drains the spool.
-    const spoolDir = join(stateDir, "spool");
-    const spool = new Spool({ rootDir: spoolDir });
-    const client = createClient(config, pluginConfig.timeoutMs ?? 15000);
-
-    const recordFor = (request: DispatchRequest): SpoolRecord => {
-      const received = new Date();
-      const settleMs = pluginConfig.settleMs ?? 800;
-      return {
-        key: spoolKey(request.accountId, request.messageId ?? `${request.sessionKey}:${received.getTime()}`),
-        accountId: request.accountId,
-        conversationId: request.conversationId,
-        inboxId: request.raw.inbox?.id !== undefined ? String(request.raw.inbox.id) : undefined,
-        messageId: request.messageId,
-        text: request.text,
-        senderId: request.senderId,
-        statusAtReceipt: request.status ?? request.raw.conversation?.status,
-        audioAttachments: request.audioAttachments
-          ? (request.audioAttachments as unknown as Array<Record<string, unknown>>)
-          : undefined,
-        receivedAt: received.toISOString(),
-        availableAt: new Date(received.getTime() + settleMs).toISOString(),
-        attempt: 0,
-        source: "webhook",
-        payload: request.raw as Record<string, unknown>
-      };
-    };
-
-    const requestFromRecord = (record: SpoolRecord): DispatchRequest => ({
-      accountId: record.accountId,
-      conversationId: record.conversationId,
-      sessionKey: `chatwoot:${record.accountId}:${record.conversationId}`,
-      text: record.text,
-      messageId: record.messageId,
-      senderId: record.senderId,
-      status: record.statusAtReceipt,
-      audioAttachments: record.audioAttachments
-        ? (record.audioAttachments as unknown as DispatchRequest["audioAttachments"])
-        : undefined,
-      raw: record.payload as DispatchRequest["raw"]
-    });
-
-    const reconcileSource: ReconcileSource = {
-      listConversations: async () =>
-        (await client.listConversationsByStatus("pending")) as ChatwootConversation[],
-      listConversationMessages: (conversationId: number) => client.listMessages(conversationId),
-      getConversation: (conversationId: number) => client.getConversation(conversationId)
-    };
-
-    const queue = new SpoolQueue({
-      spool,
-      config,
-      dispatch,
-      toRequest: requestFromRecord,
-      client: reconcileSource,
-      log: api.logger,
-      settleMs: pluginConfig.settleMs,
-      reconcileIntervalMs: pluginConfig.reconcileIntervalMs,
-      privateNote: async (record, reason) => {
-        await client.sendPrivateNote(
-          record.conversationId,
-          `OpenClaw queue: message ${record.messageId} exhausted dispatch retries (${reason}).`
-        );
-      }
-    });
-    if (queueEnabled) void queue.start();
-
     const deps: WebhookHandlerDeps = {
       config,
       state,
       dispatch,
-      lanes,
       log: api.logger
     };
 
@@ -456,13 +338,6 @@ Customer: ${customerLine}`;
         const timestampHeader = firstHeader(req, "x-chatwoot-timestamp");
         const deliveryId = firstHeader(req, "x-chatwoot-delivery");
 
-        const event = safeParseEvent(rawBody);
-        const isConversationEvent =
-          typeof event === "string" &&
-          (event === "conversation_updated" ||
-            event === "conversation_status_changed" ||
-            event === "conversation_created");
-
         const eventDeps: WebhookHandlerDeps = {
           ...deps,
           signatureHeader,
@@ -470,45 +345,21 @@ Customer: ${customerLine}`;
           deliveryId
         };
 
-        if (isConversationEvent) {
-          const result = await handleConversationEvent(rawBody, eventDeps);
-          res.statusCode = result.status;
-          res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify({ ok: result.status === 200, action: result.action, reason: result.reason }));
-          return;
-        }
+        // 1. Authenticate, classify, and claim the message id before any work.
+        const ack = await prepareInboundAck(rawBody, eventDeps);
 
-        // 1. Prepare and validate the ack. With the durable queue enabled, a
-        //    dispatchable message is persisted BEFORE the response and the
-        //    agent turn runs in the background worker — Chatwoot never sees
-        //    agent failures, and nothing is lost on gateway restart.
-        const ack = await prepareInboundAck(
-          rawBody,
-          eventDeps,
-          queueEnabled ? { spool, recordFor } : {}
-        );
-
-        // 2. Respond immediately to Chatwoot (<10ms) so Chatwoot never times out!
+        // 2. Respond immediately to Chatwoot (<10ms) so Chatwoot never times out.
         res.statusCode = ack.status;
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ ok: ack.status === 200, action: ack.action, reason: ack.reason }));
 
-        // 3. Durable queue path: worker drains asynchronously; only wake it.
-        if (ack.action === "accepted") {
-          queue.wake();
-          return;
-        }
-
-        // Inbound dispatch: in the default session-owned mode (and backward-
-        // compatible inline mode), run the turn inside this handler so the
-        // Gateway root task stays admitted for the whole run.
-        // On submission/dispatch error: do NOT retry, do NOT auto-handoff, and
-        // do NOT open the conversation. Mark the turn failed internally (log)
-        // and leave the Chatwoot conversation pending without sending any
-        // customer message.
+        // 3. Run the turn inside this handler so the Gateway root task stays
+        //    admitted for the whole run. On submission error: do NOT retry, do
+        //    NOT hand off, and do NOT open the conversation. Log the failure
+        //    and leave the Chatwoot conversation pending.
         if (ack.action === "dispatched" && ack.request) {
           try {
-            await dispatchAdmitted(ack.request, eventDeps);
+            await dispatch(ack.request);
           } catch (err) {
             const msg = (err as Error)?.message ?? String(err);
             api.logger.warn?.(
@@ -525,15 +376,6 @@ function firstHeader(req: { headers: Record<string, string | string[] | undefine
   const val = req.headers[name];
   if (Array.isArray(val)) return val[0];
   return val;
-}
-
-function safeParseEvent(raw: string): string | undefined {
-  try {
-    const obj = JSON.parse(raw);
-    return typeof obj?.event === "string" ? obj.event : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function readRequestBody(req: any): Promise<string> {

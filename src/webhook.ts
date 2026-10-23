@@ -53,23 +53,10 @@ export interface ChatwootWebhookAttachment {
   [key: string]: unknown;
 }
 
-export interface ChatwootWebhookConversation extends Record<string, unknown> {
-  event: "conversation_updated" | "conversation_status_changed" | "conversation_created";
-  /** Real Chatwoot conversation events are flat: id/status/team_id at the top level. */
-  id?: number | string;
-  status?: string;
-  team_id?: number | string | null;
-  changed_attributes?: Record<string, unknown>;
-  conversation?: {
-    id?: number | string;
-    status?: string;
-    team_id?: number | string | null;
-    [key: string]: unknown;
-  };
-  account?: { id?: number | string; [key: string]: unknown };
-}
-
-export type ChatwootWebhookEvent = ChatwootWebhookMessage | ChatwootWebhookConversation;
+/** Non-message events (conversation_*, contact_*, etc.) are classified and ignored. */
+export type ChatwootWebhookEvent =
+  | ChatwootWebhookMessage
+  | (Record<string, unknown> & { event: string });
 
 export type InboundAction = "dispatch" | "ignore";
 
@@ -198,11 +185,12 @@ export function parseWebhook(rawBody: string): ChatwootWebhookEvent {
  * ignored instead of being dispatched to the agent.
  */
 export function isAccountAllowed(
-  event: { account?: { id?: number | string; [key: string]: unknown } },
+  event: Record<string, unknown>,
   config?: ChatwootChannelConfig
 ): boolean {
   if (!config || config.accountId === undefined || config.accountId === null) return true;
-  const payloadAccountId = event.account?.id;
+  const account = event.account as { id?: number | string } | undefined;
+  const payloadAccountId = account?.id;
   if (payloadAccountId === undefined || payloadAccountId === null) return true;
   return String(payloadAccountId) === String(config.accountId);
 }

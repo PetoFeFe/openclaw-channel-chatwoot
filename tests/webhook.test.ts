@@ -199,7 +199,6 @@ describe("AgentBot webhook support", () => {
     baseUrl: "http://chatwoot:3000",
     accountId: 3,
     apiToken: "t",
-    botInboxIds: [4],
     ...overrides
   });
 

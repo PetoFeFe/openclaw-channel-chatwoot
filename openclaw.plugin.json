@@ -1,8 +1,8 @@
 {
   "id": "chatwoot",
   "name": "Chatwoot",
-  "description": "Native OpenClaw channel plugin for Chatwoot. Chatwoot stays the source of truth for conversations and human support; OpenClaw handles AI execution.",
-  "version": "0.4.3",
+  "description": "Inbound-only OpenClaw channel plugin for Chatwoot. Validates webhooks and delivers customer messages to the agent; the agent owns every Chatwoot reply and assignment.",
+  "version": "0.5.0",
   "channels": [
     "chatwoot"
   ],
@@ -17,7 +17,7 @@
         "properties": {
           "baseUrl": {
             "type": "string",
-            "description": "Chatwoot base URL, e.g. https://app.chatwoot.com"
+            "description": "Chatwoot base URL, e.g. https://app.chatwoot.com (also used to resolve inbound attachment URLs)"
           },
           "accountId": {
             "type": [
@@ -28,7 +28,7 @@
           },
           "apiToken": {
             "type": "string",
-            "description": "Chatwoot user API access token (api_access_token)"
+            "description": "Chatwoot user API access token (api_access_token). Used only to download private inbound media."
           },
           "webhookSecret": {
             "type": "string",
@@ -37,16 +37,6 @@
           "agentBotWebhookSecret": {
             "type": "string",
             "description": "Chatwoot AgentBot secret. In native mode, inbound signatures are validated against webhookSecret AND this secret; either match is accepted (one route serves account webhooks and AgentBot deliveries)."
-          },
-          "botInboxIds": {
-            "type": "array",
-            "items": {
-              "type": [
-                "integer",
-                "string"
-              ]
-            },
-            "description": "Inbox ids driven by a Chatwoot AgentBot. On these inboxes the conversation status is the ownership signal: pending = bot answers; open/snoozed = human-owned (automatic replies suppressed)."
           },
           "webhookSignatureMode": {
             "type": "string",
@@ -72,48 +62,6 @@
             "type": "string",
             "default": "/chatwoot/webhook",
             "description": "Gateway HTTP path that receives Chatwoot webhooks"
-          },
-          "receptionTeamId": {
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Chatwoot team id that human reception is assigned to"
-          },
-          "receptionTeamName": {
-            "type": "string",
-            "description": "Optional human-readable reception team name (diagnostics only)"
-          },
-          "administrationTeamId": {
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Chatwoot team id for administration (Level 2). Used to validate agent-requested handoffs."
-          },
-          "administrationTeamName": {
-            "type": "string",
-            "description": "Optional human-readable administration team name (diagnostics only)"
-          },
-          "fallbackModels": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Deprecated: model failover is owned by OpenClaw core (agents.defaults.model.fallbacks). Accepted for backward compatibility but not used for dispatch."
-          },
-          "handoffNotice": {
-            "type": "string",
-            "description": "Customer-facing notice sent when handing off to reception"
-          },
-          "handoffNoteTemplate": {
-            "type": "string",
-            "description": "Private note added to the conversation on handoff"
-          },
-          "maxRetries": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 3
           },
           "allowFrom": {
             "type": "array",
@@ -151,12 +99,6 @@
         },
         "accountId": {
           "label": "Account id"
-        },
-        "receptionTeamId": {
-          "label": "Reception team id"
-        },
-        "administrationTeamId": {
-          "label": "Administration team id"
         }
       }
     }
@@ -167,29 +109,7 @@
     "properties": {
       "stateDir": {
         "type": "string",
-        "description": "Directory for durable plugin state (processed events, handoff status, pending effects)"
-      },
-      "settleMs": {
-        "type": "integer",
-        "minimum": 0,
-        "default": 800,
-        "description": "Coalescing window (ms) for rapid messages in the same Chatwoot conversation before a single agent turn is run. Set 0 to disable coalescing while keeping per-conversation serialization."
-      },
-      "timeoutMs": {
-        "type": "integer",
-        "minimum": 1000,
-        "default": 15000
-      },
-      "queueEnabled": {
-        "type": "boolean",
-        "default": false,
-        "description": "Legacy durable inbound queue (spool + background worker, OpenResponses submission model). Defaults to false (session-owned ingress): webhooks submit directly to runtime.channel.inbound.run without filesystem spool or per-conversation lanes. Set true only to re-enable legacy spool+lanes."
-      },
-      "reconcileIntervalMs": {
-        "type": "integer",
-        "minimum": 0,
-        "default": 60000,
-        "description": "How often the reconciler scans recent pending bot-inbox conversations for customer messages the spool never accepted. 0 disables."
+        "description": "Directory for durable inbound deduplication state (delivery ids and processed message ids)"
       }
     }
   },

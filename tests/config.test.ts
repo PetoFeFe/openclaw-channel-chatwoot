@@ -44,20 +44,6 @@ describe("channel config", () => {
     }
   });
 
-  it("keeps optional handoff and fallback settings", () => {
-    const config = normalizeChannelConfig({
-      baseUrl: "https://x",
-      accountId: 1,
-      apiToken: "t",
-      receptionTeamId: 5,
-      fallbackModels: ["a", "b"],
-      maxRetries: 1
-    });
-    expect(config.receptionTeamId).toBe(5);
-    expect(config.fallbackModels).toEqual(["a", "b"]);
-    expect(config.maxRetries).toBe(1);
-  });
-
   it("defaults to native Chatwoot webhook signing", () => {
     const config = normalizeChannelConfig({ baseUrl: "https://x", accountId: 1, apiToken: "t" });
     expect(config.webhookSignatureMode).toBe("chatwoot");

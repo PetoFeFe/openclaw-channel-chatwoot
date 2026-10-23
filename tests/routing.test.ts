@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { conversationKey, parseSessionKey, sessionKey } from "../src/routing.js";
+import { parseSessionKey, sessionKey } from "../src/routing.js";
 
 describe("routing", () => {
   it("builds deterministic session keys", () => {
@@ -15,9 +15,5 @@ describe("routing", () => {
   it("round-trips session keys", () => {
     expect(parseSessionKey("chatwoot:9:77")).toEqual({ accountId: "9", conversationId: "77" });
     expect(parseSessionKey("nope")).toBeNull();
-  });
-
-  it("uses the same key for conversation and session", () => {
-    expect(conversationKey(1, 42)).toBe(sessionKey(1, 42));
   });
 });

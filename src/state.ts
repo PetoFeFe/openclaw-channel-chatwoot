@@ -4,43 +4,28 @@ import { dirname } from "node:path";
 /**
  * Durable plugin state.
  *
- * Tracks:
- *  - processed inbound message ids (webhook deduplication)
- *  - handoff status per conversation (auto-reply suppression + resume)
- *  - pending side effects (assign/note/notice) so retries and restarts do not
- *    create duplicate messages or notes.
+ * Tracks processed webhook keys (delivery ids and Chatwoot message ids) so a
+ * redelivered webhook can never start a second agent turn.
  *
  * Persistence is an atomic JSON file write (temp file + rename). Tests can use
  * the in-memory variant via createMemoryState().
  */
 
-export interface HandoffState {
-  active: boolean;
-  teamId?: string;
-  reason?: string;
-  updatedAt: string;
-  assigned?: boolean;
-  noteSent?: boolean;
-  customerNoticeSent?: boolean;
-}
-
-export interface PendingEffect {
-  id: string;
-  kind: "assign-team" | "handoff-note" | "customer-notice" | string;
-  status: "pending" | "done";
-  attempts: number;
-  result?: unknown;
-  updatedAt: string;
-}
-
 interface StateData {
   processed: Record<string, string>;
-  handoffs: Record<string, HandoffState>;
-  effects: Record<string, Record<string, PendingEffect>>;
 }
 
 function emptyState(): StateData {
-  return { processed: {}, handoffs: {}, effects: {} };
+  return { processed: {} };
+}
+
+function readProcessed(value: unknown): Record<string, string> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  const processed: Record<string, string> = {};
+  for (const [key, at] of Object.entries(value)) {
+    if (typeof at === "string") processed[key] = at;
+  }
+  return processed;
 }
 
 export interface DurableStateOptions {
@@ -62,7 +47,10 @@ export class DurableState {
     const store = new DurableState(options);
     if (options.filePath && existsSync(options.filePath)) {
       try {
-        store.data = { ...emptyState(), ...JSON.parse(readFileSync(options.filePath, "utf8")) };
+        const parsed = JSON.parse(readFileSync(options.filePath, "utf8")) as {
+          processed?: unknown;
+        };
+        store.data = { processed: readProcessed(parsed?.processed) };
       } catch (error) {
         throw new Error(
           `chatwoot: failed to read state file ${options.filePath}: ${(error as Error).message}`
@@ -109,65 +97,6 @@ export class DurableState {
     this.data.processed[key] = at;
     await this.persist();
     return true;
-  }
-
-  /**
-   * Roll back a claim made by claimProcessed (used when durable queueing of a
-   * message fails after the claim, so a redelivery can retry end-to-end).
-   */
-  async releaseClaim(key: string): Promise<void> {
-    if (!Object.prototype.hasOwnProperty.call(this.data.processed, key)) return;
-    delete this.data.processed[key];
-    await this.persist();
-  }
-
-  // ---- handoff status ----
-
-  getHandoff(convKey: string): HandoffState | undefined {
-    return this.data.handoffs[convKey];
-  }
-
-  isHandoffActive(convKey: string): boolean {
-    return this.data.handoffs[convKey]?.active === true;
-  }
-
-  async setHandoff(convKey: string, state: HandoffState | undefined): Promise<void> {
-    if (state === undefined) delete this.data.handoffs[convKey];
-    else this.data.handoffs[convKey] = state;
-    await this.persist();
-  }
-
-  // ---- pending effects ----
-
-  getEffect(convKey: string, effectId: string): PendingEffect | undefined {
-    return this.data.effects[convKey]?.[effectId];
-  }
-
-  listEffects(convKey: string): PendingEffect[] {
-    return Object.values(this.data.effects[convKey] ?? {});
-  }
-
-  /** Conversation keys that have at least one recorded effect. */
-  pendingConversationKeys(): string[] {
-    return Object.keys(this.data.effects);
-  }
-
-  /** All known conversation keys (handoff records + effects). */
-  knownConversationKeys(): string[] {
-    return Array.from(new Set([...Object.keys(this.data.handoffs), ...Object.keys(this.data.effects)]));
-  }
-
-  async putEffect(convKey: string, effect: PendingEffect): Promise<void> {
-    const bucket = (this.data.effects[convKey] ??= {});
-    bucket[effect.id] = effect;
-    await this.persist();
-  }
-
-  async deleteEffect(convKey: string, effectId: string): Promise<void> {
-    if (this.data.effects[convKey]) {
-      delete this.data.effects[convKey][effectId];
-      await this.persist();
-    }
   }
 
   /** Flush pending writes (tests / shutdown). */

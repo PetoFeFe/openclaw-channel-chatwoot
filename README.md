@@ -1,17 +1,21 @@
 # OpenClaw Chatwoot channel plugin
 
 A thin, native [OpenClaw](https://docs.openclaw.ai) channel plugin that connects
-OpenClaw to [Chatwoot](https://www.chatwoot.com).
+OpenClaw to [Chatwoot](https://www.chatwoot.com). It is **inbound only**.
 
-- **Chatwoot owns** conversation history, assignment, and the human support workflow.
+- **Chatwoot owns** conversation history, replies, notes, assignment, and the
+  human support workflow.
 - **OpenClaw owns** agent execution and model selection.
-- The plugin is a thin adapter: it validates and deduplicates Chatwoot webhooks,
-  routes each conversation to a deterministic OpenClaw session, delivers agent
-  replies through the Chatwoot public API, and hands off to a human reception
-  team on terminal failure.
+- The plugin validates and deduplicates Chatwoot webhooks, routes each
+  conversation to a deterministic OpenClaw session, and delivers the customer
+  message to the agent.
+- The **agent owns every Chatwoot action**: replies, private notes, team
+  assignment, and status changes. The plugin has no outbound adapter and never
+  calls Chatwoot's send/assign APIs.
 
-There is **no n8n** and **no separate integration microservice**. The separate
-Help Center MCP server is untouched (`get_inbox`, `search_kb`, `get_article`).
+There is **no n8n**, no separate integration microservice, no plugin-side queue,
+and no plugin-side handoff state machine. The separate Help Center MCP server is
+untouched (`get_inbox`, `search_kb`, `get_article`).
 
 ## Architecture
 
@@ -19,31 +23,30 @@ Help Center MCP server is untouched (`get_inbox`, `search_kb`, `get_article`).
 Chatwoot ──webhook──▶ OpenClaw Gateway
                        └─ chatwoot plugin (registerHttpRoute)
                             ├─ verify signature (native X-Chatwoot or custom HMAC)
-                            ├─ filter outgoing/private/self messages
-                            ├─ dedupe by Chatwoot message id (durable)
+                            ├─ filter outgoing/private/self/non-message events
+                            ├─ dedupe delivery id + Chatwoot message id (durable)
                             ├─ route session chatwoot:<account_id>:<conversation_id>
-                            ├─ run agent (retry; model failover is core-owned)
-                            └─ deliver reply via Chatwoot public API (receipt id)
+                            ├─ stage inbound media (voice notes/images)
+                            └─ submit customer message to the agent session
+                                 └─ agent replies/assigns via Chatwoot CLI/tools
 ```
+
+The webhook is acknowledged with HTTP 200 as soon as the message is validated
+and claimed. The agent turn runs inside the same gateway request scope.
 
 ## Features
 
-- Config for Chatwoot base URL, account id, API token, webhook secret/header,
-  and reception team id.
-- Webhook handler that validates the signature, filters `outgoing`/`private`
-  messages, and deduplicates by Chatwoot message id.
+- Native Chatwoot webhook signature verification, replay window, and optional
+  custom HMAC mode.
+- Account scoping plus filtering of outgoing, private, self-authored, and
+  non-message events.
+- Durable deduplication by `X-Chatwoot-Delivery` and Chatwoot message id.
 - Deterministic session routing `chatwoot:<account_id>:<conversation_id>`.
-- Outbound adapter using Chatwoot's public API with confirmed delivery receipts
-  (the returned message id).
-- Failure handler distinguishing **transient**, **quota**, **auth/config**, and
-  **outbound delivery** failures.
-- Configurable **fallback-model** behavior and **terminal failure handoff**.
-- Human handoff: assign reception team, add a private note, send a
-  customer-facing notice, and suppress automatic replies while a human owns the
-  conversation.
-- Durable state for processed events, handoff status, and pending side effects —
-  retries and restarts never create duplicate messages or notes.
-- Explicit, verified resume when reception returns the conversation to the bot.
+- Inbound voice-note/image staging into the OpenClaw media store. The plugin
+  never transcribes media; the agent runtime does that during its turn.
+- No automatic retry and no automatic human handoff when agent submission
+  fails. The failure is logged, the message stays claimed, and the Chatwoot
+  conversation is left untouched (`pending`) for a human.
 
 ## Requirements
 
@@ -79,8 +82,7 @@ example. The short version:
       baseUrl: "https://app.chatwoot.com",
       accountId: 1,
       apiToken: "your-api-token",
-      webhookSecret: "your-webhook-secret",
-      receptionTeamId: 1
+      webhookSecret: "your-webhook-secret"
     }
   }
 }
@@ -104,41 +106,38 @@ Channel config lives under `channels.chatwoot`. Plugin-level config lives under
 
 | Key | Required | Description |
 | --- | --- | --- |
-| `baseUrl` | yes | Chatwoot base URL (no trailing slash). |
+| `baseUrl` | yes | Chatwoot base URL (no trailing slash); also resolves inbound attachment URLs. |
 | `accountId` | yes | Chatwoot account id. |
-| `apiToken` | yes | Chatwoot user API access token (`api_access_token`). |
-| `webhookSecret` | yes* | Shared secret. Native mode sig (default). |
+| `apiToken` | yes | Chatwoot user API access token. Used only to download private inbound media. |
+| `webhookSecret` | yes* | Shared secret. Native mode signature (default). |
+| `agentBotWebhookSecret` | no | Second accepted native signature secret (AgentBot deliveries). |
 | `webhookSignatureMode` | no | `chatwoot` (default) or `custom`. |
 | `webhookHeader` | no | Signature header, custom mode (default `x-openclaw-signature`). |
 | `webhookTimestampToleranceSec` | no | Native-mode replay window (default 300, 0 = off). |
 | `webhookPath` | no | Gateway route (default `/chatwoot/webhook`). |
-| `receptionTeamId` | no | Team id for human handoff assignment. |
-| `fallbackModels` | no | Deprecated (model failover is core-owned via `agents.defaults.model.fallbacks`). |
-| `handoffNotice` | no | Customer-facing notice on handoff. |
-| `handoffNoteTemplate` | no | Private note template (`{session}`, `{conversation}`, `{reason}`). |
-| `maxRetries` | no | Transient retries (default 3). |
 | `allowFrom` / `dmSecurity` | no | DM policy for the channel. |
 
 \* `webhookSecret` is required when `webhookSignatureMode` is `chatwoot`
 (default) or when using custom mode; inbound webhooks without a valid signature
 are rejected with `401`.
 
-## Failure and handoff flow
+| Plugin key | Required | Description |
+| --- | --- | --- |
+| `stateDir` | no | Durable dedupe state directory. Defaults to `OPENCLAW_CHATWOOT_STATE_DIR` or `<state>/.state`. |
 
-See [`docs/failure-handoff.md`](docs/failure-handoff.md) for the full state
-machine. Summary:
+## Inbound behavior
 
-| Failure | Action |
-| --- | --- |
-| Transient (network/5xx/rate limit) | Bounded retry, then fallback model, then handoff. |
-| Quota exhausted | Fallback model immediately; handoff when none remain. |
-| Auth / configuration | Operator alert only. Never surfaced to the customer. |
-| Outbound delivery | Retry in the client; handoff on terminal failure. |
-| Terminal agent error | Handoff to reception. |
+See [`docs/inbound-flow.md`](docs/inbound-flow.md) for the complete sequence.
 
-Handoff: assign team → private note → customer notice → suppress auto-replies.
-Resume only on a verified assignment/status event. Duplicate fallback replies are
-suppressed when OpenClaw has already delivered an error response.
+- Duplicate deliveries and duplicate message ids return `200` without starting
+  another agent turn.
+- Conversation status is **not** an ingress filter. The live status is passed to
+  the agent, which decides whether to reply or stay silent.
+- If submitting to the agent fails, the plugin logs the failure and does not
+  retry, does not assign a team, does not send a notice, and does not change the
+  conversation status.
+- Media staging failure passes the original URL through so the agent can still
+  attempt to use it.
 
 ## Tests
 
@@ -150,31 +149,22 @@ version may be older than OpenClaw requires):
 ./scripts/test.sh shell    # interactive shell in the same image
 ```
 
-Covered cases: successful inbound/outbound, duplicate webhooks, isolated
-conversations, quota exhaustion, transient model errors, fallback-model success,
-Chatwoot API failures, duplicate side effects, human takeover, explicit resume,
-and recovery after restart.
-
-Chatwoot itself is not deployed: tests use an in-process mock of the Chatwoot
-public API and Chatwoot-shaped webhook payloads.
+Covered cases: inbound dispatch, duplicate webhooks, account isolation,
+signature verification/replay rejection, non-message events, dedupe persistence,
+and preservation of the claim after a failed dispatch.
 
 ## Layout
 
 ```
 openclaw.plugin.json        manifest (channels, channelConfigs schema)
-index.ts                    plugin entry + webhook HTTP route
+index.ts                    plugin entry + webhook HTTP route + media staging
 setup-entry.ts              lightweight setup entry
 src/
-  channel.ts                channel plugin (config, security, outbound)
-  client.ts                 Chatwoot public API client
+  channel.ts                inbound-only channel plugin object
   webhook.ts                parse / authenticate / filter events
   routing.ts                deterministic session keys
-  handler.ts                inbound orchestration + failure policy
-  failure.ts                failure classification
-  fallback.ts               fallback-model decisions
-  handoff.ts                handoff, suppression, resume
-  state.ts                  durable state
-  model.ts                  agent outcome normalization
+  handler.ts                inbound admission + dedupe + dispatch
+  state.ts                  durable dedupe state
 tests/                      vitest mock tests
 docker-compose.yml          single OpenClaw Gateway container
 scripts/test.sh             in-container test runner

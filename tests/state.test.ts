@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,37 +37,24 @@ describe("durable state", () => {
     const file = tempFile();
     const first = DurableState.open({ filePath: file });
     await first.markProcessed("msg:1:1");
-    await first.setHandoff("chatwoot:1:5", {
-      active: true,
-      updatedAt: new Date().toISOString(),
-      noteSent: true
-    });
+    await first.markProcessed("delivery:abc");
 
     const second = DurableState.open({ filePath: file });
     expect(second.isProcessed("msg:1:1")).toBe(true);
-    expect(second.getHandoff("chatwoot:1:5")?.active).toBe(true);
-    expect(second.getHandoff("chatwoot:1:5")?.noteSent).toBe(true);
+    expect(second.isProcessed("delivery:abc")).toBe(true);
   });
 
-  it("tracks pending effects", async () => {
-    const state = createMemoryState();
-    await state.putEffect("chatwoot:1:5", {
-      id: "handoff-note",
-      kind: "handoff-note",
-      status: "pending",
-      attempts: 1,
-      updatedAt: new Date().toISOString()
-    });
-    expect(state.listEffects("chatwoot:1:5")).toHaveLength(1);
-    expect(state.pendingConversationKeys()).toEqual(["chatwoot:1:5"]);
-    await state.deleteEffect("chatwoot:1:5", "handoff-note");
-    expect(state.listEffects("chatwoot:1:5")).toHaveLength(0);
-  });
+  it("ignores legacy handoff/effect keys in an existing state file", async () => {
+    const file = tempFile();
+    const first = DurableState.open({ filePath: file });
+    await first.markProcessed("msg:1:9");
 
-  it("clears a handoff on resume", async () => {
-    const state = createMemoryState();
-    await state.setHandoff("chatwoot:1:5", { active: true, updatedAt: new Date().toISOString() });
-    await state.setHandoff("chatwoot:1:5", undefined);
-    expect(state.getHandoff("chatwoot:1:5")).toBeUndefined();
+    const legacy = JSON.parse(readFileSync(file, "utf8"));
+    legacy.handoffs = { "chatwoot:1:5": { active: true, updatedAt: "2026-01-01T00:00:00.000Z" } };
+    legacy.effects = { "chatwoot:1:5": { note: { id: "note", kind: "handoff-note", status: "done", attempts: 1, updatedAt: "2026-01-01T00:00:00.000Z" } } };
+    writeFileSync(file, JSON.stringify(legacy), "utf8");
+
+    const second = DurableState.open({ filePath: file });
+    expect(second.isProcessed("msg:1:9")).toBe(true);
   });
 });

@@ -10,10 +10,6 @@ export function sessionKey(accountId: string | number, conversationId: string | 
   return `chatwoot:${String(accountId)}:${String(conversationId)}`;
 }
 
-export function conversationKey(accountId: string | number, conversationId: string | number): string {
-  return `chatwoot:${String(accountId)}:${String(conversationId)}`;
-}
-
 export interface ParsedSessionKey {
   accountId: string;
   conversationId: string;

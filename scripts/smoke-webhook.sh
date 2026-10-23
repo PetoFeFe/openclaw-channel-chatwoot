@@ -89,7 +89,7 @@ smoke() {
 
   local conv
   conv="{\"event\":\"conversation_updated\",\"id\":${CONVERSATION_ID},\"status\":\"resolved\",\"team_id\":1,\"account\":{\"id\":${ACCOUNT_ID}}}"
-  echo "== conversation event with no active handoff is ignored =="
+  echo "== conversation event is ignored =="
   post "$conv" ignored
 
   local foreign
