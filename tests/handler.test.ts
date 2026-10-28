@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  formatInboundPrompt,
   handleWebhookEvent,
+  prepareInboundAck,
   type Dispatch,
   type WebhookHandlerDeps
 } from "../src/handler.js";
@@ -152,5 +154,65 @@ describe("inbound webhook handler", () => {
       }
     );
     expect(result.status).toBe(401);
+  });
+
+  it("formats the default inbound prompt identically to legacy format", async () => {
+    const { deps } = setup(vi.fn());
+    const ack = await prepareInboundAck(
+      body(makeMessageEvent({ conversationId: 55, messageId: 10, content: "Potrebujem pomoc" })),
+      deps
+    );
+    expect(ack.request).toBeDefined();
+    expect(formatInboundPrompt(ack.request!)).toBe(
+      "[Chatwoot Conversation 55 | Account 1 | Status: open]\nCustomer: Potrebujem pomoc"
+    );
+  });
+
+  it("formats a custom promptTemplate with contact details and fallbacks", async () => {
+    const { deps } = setup(vi.fn());
+    const payload = {
+      ...makeMessageEvent({ conversationId: 55, messageId: 11, content: "Ahoj" }),
+      inbox: {
+        id: 7,
+        name: "Podpora Email"
+      },
+      conversation: {
+        id: 55,
+        status: "open",
+        channel: "Channel::Email"
+      },
+      sender: {
+        id: 42,
+        type: "contact",
+        name: "Ján Novák",
+        phone_number: "+421900111222",
+        email: null,
+        custom_attributes: {
+          company: "Acme s.r.o."
+        }
+      }
+    };
+    const ack = await prepareInboundAck(body(payload), deps);
+    expect(ack.request?.inboxName).toBe("Podpora Email");
+    expect(ack.request?.inboxType).toBe("Email");
+    expect(ack.request?.contact).toEqual({
+      id: "42",
+      name: "Ján Novák",
+      phone: "+421900111222",
+      email: undefined,
+      identifier: undefined,
+      customAttributes: { company: "Acme s.r.o." },
+      additionalAttributes: undefined
+    });
+
+    const formatted = formatInboundPrompt(ack.request!, {
+      promptTemplate:
+        "[Chatwoot Conversation {conversationId} | Account {accountId} | Status: {status} | Inbox: {inboxName} ({inboxType}) | Name: {contact.name} | Phone: {contact.phone} | Email: {contact.email} | Company: {contact.custom_attributes.company} | Note: {contact.custom_attributes.note|žiadna}]\nCustomer: {text}",
+      promptFallbackValue: "N/A"
+    });
+
+    expect(formatted).toBe(
+      "[Chatwoot Conversation 55 | Account 1 | Status: open | Inbox: Podpora Email (Email) | Name: Ján Novák | Phone: +421900111222 | Email: N/A | Company: Acme s.r.o. | Note: žiadna]\nCustomer: Ahoj"
+    );
   });
 });

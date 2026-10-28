@@ -72,6 +72,16 @@
           "dmSecurity": {
             "type": "string",
             "description": "DM policy (e.g. allowlist, open)"
+          },
+          "promptTemplate": {
+            "type": "string",
+            "default": "[Chatwoot Conversation {conversationId} | Account {accountId} | Status: {status}]\nCustomer: {text}",
+            "description": "Template for inbound messages sent to the agent. Supports {conversationId}, {accountId}, {status}, {inboxId}, {inboxName}, {inboxType}, {text}, {contact.name}, {contact.phone}, {contact.email}, {contact.identifier}, {contact.custom_attributes.<key>}, and inline fallbacks like {contact.email|N/A}."
+          },
+          "promptFallbackValue": {
+            "type": "string",
+            "default": "N/A",
+            "description": "Default replacement string when a placeholder in promptTemplate resolves to an empty/missing value."
           }
         },
         "required": [
@@ -99,6 +109,14 @@
         },
         "accountId": {
           "label": "Account id"
+        },
+        "promptTemplate": {
+          "label": "Prompt template",
+          "placeholder": "[Chatwoot Conversation {conversationId} | Account {accountId} | Status: {status} | Name: {contact.name} | Phone: {contact.phone} | Email: {contact.email}]\nCustomer: {text}"
+        },
+        "promptFallbackValue": {
+          "label": "Prompt fallback value",
+          "placeholder": "N/A"
         }
       }
     }

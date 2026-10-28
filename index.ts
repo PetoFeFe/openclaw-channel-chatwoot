@@ -21,6 +21,7 @@ import {
 } from "openclaw/plugin-sdk/media-understanding";
 import { chatwootPlugin, resolveChatwootConfig } from "./src/channel.js";
 import {
+  formatInboundPrompt,
   prepareInboundAck,
   type Dispatch,
   type WebhookHandlerDeps
@@ -232,7 +233,6 @@ export default defineChannelPluginEntry({
           ? String(request.messageId)
           : `${request.sessionKey}:${Date.now()}`;
 
-      const statusNote = request.status ?? "unknown";
       const audio: Array<Record<string, unknown>> = (request.audioAttachments ??
         []) as unknown as Array<Record<string, unknown>>;
 
@@ -261,8 +261,11 @@ export default defineChannelPluginEntry({
 
       const voiceNote = mediaFacts.length > 0 && !request.text;
       const customerLine = voiceNote ? "(mensagem de voz recebida)" : request.text;
-      const promptText = `[Chatwoot Conversation ${request.conversationId} | Account ${request.accountId} | Status: ${statusNote}]
-Customer: ${customerLine}`;
+      const promptText = formatInboundPrompt(request, {
+        promptTemplate: config.promptTemplate,
+        promptFallbackValue: config.promptFallbackValue,
+        textOverride: customerLine
+      });
 
       const ctxPayload = api.runtime.channel.reply.finalizeInboundContext({
         Body: promptText,
@@ -291,6 +294,10 @@ Customer: ${customerLine}`;
           conversationId: request.conversationId,
           sessionKey: request.sessionKey,
           status: request.status,
+          inboxId: request.inboxId,
+          inboxName: request.inboxName,
+          inboxType: request.inboxType,
+          contact: request.contact,
           audioAttachments: audio.map((a) => String(a.data_url ?? "")).filter(Boolean)
         }
       });

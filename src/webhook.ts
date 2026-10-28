@@ -30,15 +30,56 @@ export interface ChatwootWebhookMessage extends Record<string, unknown> {
   conversation?: {
     id?: number | string;
     status?: string;
+    channel?: string;
     team_id?: number | string | null;
     inbox_id?: number | string;
-    messages?: Array<{ id?: number | string; content?: string; attachments?: ChatwootWebhookAttachment[]; [key: string]: unknown }>;
+    meta?: {
+      sender?: Record<string, unknown>;
+      channel?: string;
+      [key: string]: unknown;
+    };
+    custom_attributes?: Record<string, unknown>;
+    additional_attributes?: Record<string, unknown>;
+    messages?: Array<{
+      id?: number | string;
+      content?: string;
+      sender?: Record<string, unknown>;
+      attachments?: ChatwootWebhookAttachment[];
+      [key: string]: unknown;
+    }>;
     [key: string]: unknown;
   };
-  inbox?: { id?: number | string; name?: string; [key: string]: unknown };
+  inbox?: {
+    id?: number | string;
+    name?: string;
+    channel_type?: string;
+    type?: string;
+    [key: string]: unknown;
+  };
   account?: { id?: number | string; [key: string]: unknown };
-  sender?: { id?: number | string; type?: string; [key: string]: unknown };
+  sender?: {
+    id?: number | string;
+    type?: string;
+    name?: string;
+    email?: string | null;
+    phone_number?: string | null;
+    identifier?: string | null;
+    custom_attributes?: Record<string, unknown>;
+    additional_attributes?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
   attachments?: ChatwootWebhookAttachment[];
+}
+
+/** Normalized contact details extracted from the Chatwoot webhook payload. */
+export interface ChatwootContactInfo {
+  id?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  identifier?: string;
+  customAttributes?: Record<string, unknown>;
+  additionalAttributes?: Record<string, unknown>;
 }
 
 /** Chatwoot message attachment (push_event_data shape). */
@@ -73,6 +114,12 @@ export interface InboundDecision {
   conversationStatus?: string;
   /** Inbox id from the payload, when present (AgentBot payloads include it). */
   inboxId?: string;
+  /** Inbox name from the payload, when present. */
+  inboxName?: string;
+  /** Normalized inbox/channel type (e.g. "Email", "Whatsapp", "WebWidget"). */
+  inboxType?: string;
+  /** Extracted contact metadata from sender / conversation.meta.sender. */
+  contact?: ChatwootContactInfo;
   /** Audio attachments worth transcribing, when present. */
   audioAttachments?: ChatwootWebhookAttachment[];
 }
@@ -207,6 +254,81 @@ function idString(value: unknown): string | undefined {
   return undefined;
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return undefined;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+/**
+ * Extract normalized contact information from `sender`, falling back to
+ * `conversation.messages[0].sender` and `conversation.meta.sender`.
+ */
+export function extractContactInfo(msg: ChatwootWebhookMessage): ChatwootContactInfo {
+  const topSender = recordOf(msg.sender);
+  const nestedSender = recordOf(msg.conversation?.messages?.[0]?.sender);
+  const meta = recordOf(msg.conversation?.meta);
+  const metaSender = recordOf(meta?.sender);
+
+  const pick = (key: string): unknown => {
+    for (const source of [topSender, nestedSender, metaSender]) {
+      const val = source?.[key];
+      if (val !== undefined && val !== null && val !== "") return val;
+    }
+    return undefined;
+  };
+
+  const customAttributes = {
+    ...(recordOf(metaSender?.custom_attributes) ?? {}),
+    ...(recordOf(nestedSender?.custom_attributes) ?? {}),
+    ...(recordOf(topSender?.custom_attributes) ?? {})
+  };
+  const additionalAttributes = {
+    ...(recordOf(metaSender?.additional_attributes) ?? {}),
+    ...(recordOf(nestedSender?.additional_attributes) ?? {}),
+    ...(recordOf(topSender?.additional_attributes) ?? {})
+  };
+
+  return {
+    id: idString(pick("id")),
+    name: nonEmptyString(pick("name")),
+    email: nonEmptyString(pick("email")),
+    phone: nonEmptyString(pick("phone_number") ?? pick("phone")),
+    identifier: nonEmptyString(pick("identifier")),
+    customAttributes: Object.keys(customAttributes).length > 0 ? customAttributes : undefined,
+    additionalAttributes:
+      Object.keys(additionalAttributes).length > 0 ? additionalAttributes : undefined
+  };
+}
+
+/**
+ * Extract normalized inbox / channel type from the webhook payload.
+ * Chatwoot sends e.g. `conversation.channel: "Channel::Email"` or
+ * `inbox.channel_type: "Channel::Whatsapp"`. The `Channel::` prefix is stripped
+ * for readability (e.g. "Email", "Whatsapp", "WebWidget").
+ */
+export function extractInboxType(msg: ChatwootWebhookMessage): string | undefined {
+  const rawType =
+    nonEmptyString(msg.inbox?.channel_type) ??
+    nonEmptyString(msg.inbox?.type) ??
+    nonEmptyString(msg.conversation?.channel) ??
+    nonEmptyString(recordOf(msg.conversation?.meta)?.channel);
+  if (!rawType) return undefined;
+  return rawType.replace(/^Channel::/i, "").trim() || undefined;
+}
+
 /**
  * Chatwoot `message_type` arrives as the string enum ("incoming"/"outgoing")
  * on message webhooks, but nested/push payloads may carry the raw integer
@@ -319,6 +441,12 @@ export function classifyInbound(
   }
   const status = typeof msg.conversation?.status === "string" ? msg.conversation.status : undefined;
   const inboxId = idString(msg.inbox?.id ?? msg.conversation?.inbox_id);
+  const inboxName =
+    nonEmptyString(msg.inbox?.name) ??
+    nonEmptyString(recordOf(msg.conversation?.inbox)?.name) ??
+    nonEmptyString(recordOf(recordOf(msg.conversation?.meta)?.inbox)?.name);
+  const inboxType = extractInboxType(msg);
+  const contact = extractContactInfo(msg);
   // The configured account is authoritative for the session key; fall back to
   // the payload (or empty) only when config does not pin an account.
   const scopedAccountId =
@@ -336,10 +464,13 @@ export function classifyInbound(
     conversationId,
     messageId: numericId(msg.id),
     text,
-    senderId: idString(msg.sender?.id),
+    senderId: contact.id ?? idString(msg.sender?.id),
     senderType,
     conversationStatus: status,
     inboxId,
+    inboxName,
+    inboxType,
+    contact,
     audioAttachments: audio.length > 0 ? audio : undefined
   };
 }

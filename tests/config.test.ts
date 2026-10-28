@@ -64,4 +64,16 @@ describe("channel config", () => {
     expect(config.webhookHeader).toBe("x-signature");
     expect(config.webhookTimestampToleranceSec).toBe(60);
   });
+
+  it("normalizes optional promptTemplate and promptFallbackValue", () => {
+    const config = normalizeChannelConfig({
+      baseUrl: "https://x",
+      accountId: 1,
+      apiToken: "t",
+      promptTemplate: "[Conv {conversationId} | {contact.name}]\nCustomer: {text}",
+      promptFallbackValue: "-"
+    });
+    expect(config.promptTemplate).toBe("[Conv {conversationId} | {contact.name}]\nCustomer: {text}");
+    expect(config.promptFallbackValue).toBe("-");
+  });
 });

@@ -40,6 +40,19 @@ export interface ChatwootChannelConfig {
   allowFrom?: string[];
   /** DM policy (optional). */
   dmSecurity?: string;
+  /**
+   * Template used to format the inbound prompt sent to OpenClaw.
+   * Supports placeholders like `{conversationId}`, `{accountId}`, `{status}`,
+   * `{text}`, `{contact.name}`, `{contact.phone}`, `{contact.email}`,
+   * `{contact.identifier}`, `{contact.custom_attributes.<key>}`, and inline
+   * fallbacks such as `{contact.email|N/A}`.
+   */
+  promptTemplate?: string;
+  /**
+   * Default replacement string when a template placeholder resolves to an
+   * empty/null/undefined value and has no inline `|fallback`. Defaults to "N/A".
+   */
+  promptFallbackValue?: string;
 }
 
 export interface ChatwootPluginConfig {
@@ -50,6 +63,9 @@ export const DEFAULT_WEBHOOK_PATH = "/chatwoot/webhook";
 export const DEFAULT_WEBHOOK_HEADER = "x-openclaw-signature";
 export const DEFAULT_WEBHOOK_SIGNATURE_MODE = "chatwoot" as const;
 export const DEFAULT_WEBHOOK_TOLERANCE_SEC = 300;
+export const DEFAULT_PROMPT_TEMPLATE =
+  "[Chatwoot Conversation {conversationId} | Account {accountId} | Status: {status}]\nCustomer: {text}";
+export const DEFAULT_PROMPT_FALLBACK_VALUE = "N/A";
 
 /** Normalize a raw channel config object (from OpenClaw) into a typed config. */
 export function normalizeChannelConfig(raw: Record<string, unknown> = {}): ChatwootChannelConfig {
@@ -81,6 +97,12 @@ export function normalizeChannelConfig(raw: Record<string, unknown> = {}): Chatw
         : DEFAULT_WEBHOOK_TOLERANCE_SEC,
     webhookPath: raw.webhookPath ? String(raw.webhookPath) : DEFAULT_WEBHOOK_PATH,
     allowFrom: Array.isArray(raw.allowFrom) ? (raw.allowFrom as unknown[]).map(String) : undefined,
-    dmSecurity: raw.dmSecurity ? String(raw.dmSecurity) : undefined
+    dmSecurity: raw.dmSecurity ? String(raw.dmSecurity) : undefined,
+    promptTemplate:
+      typeof raw.promptTemplate === "string" && raw.promptTemplate.trim().length > 0
+        ? raw.promptTemplate
+        : undefined,
+    promptFallbackValue:
+      typeof raw.promptFallbackValue === "string" ? raw.promptFallbackValue : undefined
   };
 }

@@ -15,7 +15,9 @@
       webhookTimestampToleranceSec: 300,
       webhookPath: "/chatwoot/webhook",
       dmSecurity: "open",
-      allowFrom: []
+      allowFrom: [],
+      promptTemplate: "[Chatwoot Conversation {conversationId} | Account {accountId} | Status: {status} | Name: {contact.name} | Phone: {contact.phone} | Email: {contact.email}]\nCustomer: {text}",
+      promptFallbackValue: "N/A"
     }
   }
 }
@@ -28,6 +30,38 @@ the Chatwoot channel is a trusted gate, so the default is an open DM policy.
 
 `apiToken` is used only to download private inbound attachments (voice notes and
 images). It is never used to send messages or change conversations.
+
+### Customizing the inbound prompt (`promptTemplate`)
+
+By default, inbound messages are formatted as:
+
+```text
+[Chatwoot Conversation {conversationId} | Account {accountId} | Status: {status}]
+Customer: {text}
+```
+
+You can customize `promptTemplate` with any combination of conversation and
+contact placeholders:
+
+- `{conversationId}` — Chatwoot conversation id
+- `{accountId}` — Chatwoot account id
+- `{status}` — Conversation status (`open`, `pending`, etc.)
+- `{inboxId}` (or `{inbox.id}`) — Inbox id
+- `{inboxName}` (or `{inbox.name}`) — Inbox name
+- `{inboxType}` (or `{inbox.type}`, `{channelType}`) — Normalized inbox/channel type (`Email`, `Whatsapp`, `WebWidget`, `Api`, etc., with `Channel::` stripped)
+- `{text}` — Customer message text (or voice-note placeholder)
+- `{contact.id}` — Contact id
+- `{contact.name}` — Contact name
+- `{contact.phone}` (or `{contact.phone_number}`) — Contact phone number
+- `{contact.email}` — Contact email address
+- `{contact.identifier}` — External contact identifier
+- `{contact.custom_attributes.<key>}` — Custom attribute on the contact
+- `{contact.additional_attributes.<key>}` — Additional attribute on the contact
+- `{conversation.custom_attributes.<key>}` — Custom attribute on the conversation
+
+When a placeholder resolves to an empty or missing value, it is replaced by
+`promptFallbackValue` (default `"N/A"`), or by an inline fallback specified
+after a pipe character (for example `{contact.email|-}` or `{contact.phone|}`).
 
 ## Plugin: `plugins.entries.chatwoot`
 
